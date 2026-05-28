@@ -5,6 +5,7 @@ import pickle
 import time
 from Inode import InodeBitmap
 from head import *
+from groupList import GroupList
 
 # 基本块
 class Block:
@@ -37,6 +38,7 @@ class SuperBlock(Block):
 
         # 成组链表法 空闲数据块
         self.free_data_block_cnt = DATA_BLOCK_NUM       # 空闲数据块数
+        self.block_group_link = GroupList(0)
 
         self.data_block_size = BLOCK_SIZE               # 数据块大小
         self.inode_size = INODE_SIZE                    # 索引节点大小
@@ -46,6 +48,32 @@ class SuperBlock(Block):
     def show_info(self):
        # TODO: 显示超级块信息
        pass
+
+    def get_data_block_id(self, fp):
+        """
+        获取一个空闲数据块ID
+        :param fp: 文件指针
+        :return: 大于0的值表示返回一个正确的ID,否则表示没有空闲数据块
+        """
+        if self.free_data_block_cnt == 0:
+            raise Exception("没有空闲空间了")
+        
+        flag, temp_id = self.block_group_link.get_free_block()
+        
+        if flag:
+            self.free_data_block_cnt -= 1
+            return temp_id
+        else: 
+            if temp_id == 0:
+                raise Exception("空闲块链已到末尾")
+            fp.seek((DATA_BLOCK_START_ID + temp_id) * BLOCK_SIZE)     
+            self.block_group_link = GroupList.from_bytes(fp.read(BLOCK_SIZE))
+            self.block_unused_cnt -= 1
+            return temp_id   
+
+
+        
+
 
 # 目录块
 class DirBlock(Block):
