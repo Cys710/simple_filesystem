@@ -9,6 +9,7 @@ DISK_SIZE = 4*1024*1024
 
 # 块大小 4KB
 BLOCK_SIZE = 4096
+
 # 块数 1024
 BLOCK_NUM = DISK_SIZE // BLOCK_SIZE
 # 索引节点大小 256B
@@ -20,6 +21,10 @@ assert BLOCK_NUM == 1024,"块数异常"
 SUPER_BLOCK_NUM = 1
 # 磁盘索引块
 INODE_BLOCK_NUM = 128
+# 索引节点数 2048
+INODE_NUM = (INODE_BLOCK_NUM * BLOCK_SIZE) // INODE_SIZE
+assert INODE_NUM == 2048,"索引节点数异常"
+
 # 数据块数 895
 DATA_BLOCK_NUM = BLOCK_NUM - SUPER_BLOCK_NUM - INODE_BLOCK_NUM
 
@@ -31,8 +36,19 @@ DATA_BLOCK_START_ID = SUPER_BLOCK_NUM + INODE_BLOCK_NUM
 
 # 目录与文件限制 (有待修改)
 DIR_NUM = 128          # 每个目录最大文件数（Linux实际无上限）
-FREE_NODE_CNT = 32     # 超级块缓存空闲inode数
-FREE_BLOCK_CNT = 128   # 超级块缓存空闲数据块数
+
+# 混合索引配置
+DIRECT_CNT = 10       # 直接索引数
+INDIRECT_CNT = 1      # 间接索引数
+
+# 成组链表法配置
+FREE_BLOCK_CNT = 50   # 一组块的数量
+
+# 根目录ID
+ROOT_ID = -1
+
+# FREE_NODE_CNT = 32     # 超级块缓存空闲inode数
+# FREE_BLOCK_CNT = 128   # 超级块缓存空闲数据块数
 
 # 目录结构（模仿Linux）
 BASE_NAME = "/"
