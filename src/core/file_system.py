@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Iterable
 
 from head import *
-from disk import open_disk
-from format_disk import format_disk, read_super_block, write_super_block
-from inode_io import read_inode, write_inode
-from init import MountedFileSystem, mount
-from object_io import read_object, write_object
+from storage.disk import open_disk
+from core.format_disk import format_disk, read_super_block, write_super_block
+from storage.inode_io import read_inode, write_inode
+from core.init import MountedFileSystem, mount
+from storage.object_io import read_object, write_object
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,8 +25,8 @@ for import_path in (str(SRC_DIR), str(DATA_DIR)):
     if import_path not in sys.path:
         sys.path.insert(0, import_path)
 
-from data import DirBlock, SuperBlock  
-from Inode import Inode  
+from dataStruct.data import DirBlock, SuperBlock  
+from dataStruct import Inode  
 
 
 

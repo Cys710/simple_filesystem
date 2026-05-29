@@ -2,10 +2,11 @@
     主要的数据结构
 """
 import time
-from Inode import InodeBitmap
+
+from dataStruct.Inode import InodeBitmap
+from dataStruct.block import Block
+from dataStruct.groupList import GroupList
 from head import *
-from groupList import GroupList
-from block import Block
 
 # 超级块
 class SuperBlock(Block):
@@ -17,7 +18,7 @@ class SuperBlock(Block):
 
         # 位图法 空闲索引节点
         self.free_inode_cnt = INODE_NUM                 # 空闲索引节点数
-        self.free_inode_bitmap = InodeBitmap()         # 索引节点位图
+        self.free_inode_bitmap = InodeBitmap()          # 索引节点位图
 
         self.free_data_block_cnt = 0
         self.block_group_link = GroupList.from_existing_stack(0, [0])
@@ -92,11 +93,6 @@ class SuperBlock(Block):
 
         self.free_data_block_cnt += 1
     
-
-
-
-        
-
 
 # 目录块
 class DirBlock(Block):

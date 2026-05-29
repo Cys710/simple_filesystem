@@ -9,26 +9,17 @@
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = PROJECT_ROOT / "src"
-DATA_DIR = SRC_DIR / "data"
-
-for import_path in (str(SRC_DIR), str(DATA_DIR)):
-    if import_path not in sys.path:
-        sys.path.insert(0, import_path)
-
 from head import DISK_NAME,BASE_NAME, BLOCK_SIZE, DATA_BLOCK_START_ID, ROOT_ID
-from disk import create_disk, open_disk
-from inode_io import read_inode, write_inode
-from object_io import read_object, write_object
+from storage.disk import create_disk, open_disk
+from storage.inode_io import read_inode, write_inode
+from storage.object_io import read_object, write_object
 
-from data import DirBlock, SuperBlock  
-from Inode import Inode  
+from dataStruct.data import DirBlock, SuperBlock  
+from dataStruct import Inode  
 
 @dataclass(frozen=True)
 class RootInitResult:

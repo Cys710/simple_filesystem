@@ -21,10 +21,10 @@ for import_path in (str(SRC_DIR), str(DATA_DIR)):
 from dataclasses import dataclass
 
 from head import DISK_NAME
-from disk import open_disk
-from data import DirBlock, SuperBlock
-from Inode import Inode
-from format_disk import read_root, read_super_block, format_disk
+from storage.disk import open_disk
+from dataStruct.data import DirBlock, SuperBlock
+from dataStruct import Inode
+from core.format_disk import read_root, read_super_block, format_disk
 
 # 从磁盘镜像中加载超级块元数据，返回一个 MountedFileSystem 对象。
 @dataclass(frozen=True)

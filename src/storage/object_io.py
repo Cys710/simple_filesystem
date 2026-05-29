@@ -9,7 +9,7 @@ from __future__ import annotations
 import pickle
 from typing import Any, BinaryIO
 
-from disk import BLOCK_SIZE, Disk, DiskIOError, read_block, write_block
+from storage.disk import BLOCK_SIZE, Disk, DiskIOError, read_block, write_block
 
 # 对象序列化格式：HEADER_SIZE字节的头部 + 负载数据
 # 头部存储负载数据的长度,头部长度为8字节

@@ -4,8 +4,7 @@
 """
 
 from __future__ import annotations
-from init import init
-from shell import main
+from cli.shell import main
 
 if __name__ == "__main__":
     main()

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from head import DISK_NAME
-from file_system import FileSystem, FileSystemError
+from core.file_system import FileSystem, FileSystemError
 
 # Shell 解析用户输入的命令并调用 FileSystem 的方法实现功能。
 class Shell:

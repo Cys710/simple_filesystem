@@ -1,4 +1,5 @@
-from block import Block
+
+from dataStruct.block import Block
 from head import DATA_BLOCK_START_ID, FREE_BLOCK_CNT, BLOCK_SIZE
 
 # 成组链表法

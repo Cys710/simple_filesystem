@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Any, BinaryIO
 
-from disk import DiskIOError, read_block, write_block
-from object_io import deserialize_object, serialize_object
+from storage.disk import DiskIOError, read_block, write_block
+from storage.object_io import deserialize_object, serialize_object
 from head import INODE_NUM, INODE_SIZE, INODE_BLOCK_START_ID,BLOCK_SIZE
 
 # 每个块可以存储的 inode 数量
