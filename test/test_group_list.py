@@ -12,7 +12,7 @@ sys.path.insert(0, SRC)
 sys.path.insert(0, DATA)
 
 from data import SuperBlock
-from groupList import GroupList
+from src.data.groupList import GroupList
 from head import BLOCK_SIZE, DATA_BLOCK_NUM, DATA_BLOCK_START_ID, FREE_BLOCK_CNT
 
 

@@ -3,7 +3,7 @@
 """
 
 # 磁盘文件
-DISK_NAME = "../FS.pfs"
+DISK_NAME = "../disk.img"
 # 磁盘大小 4MB
 DISK_SIZE = 4*1024*1024
 
