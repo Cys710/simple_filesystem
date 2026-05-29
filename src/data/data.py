@@ -1,28 +1,11 @@
 """
     主要的数据结构
 """
-import pickle
 import time
 from Inode import InodeBitmap
 from head import *
 from groupList import GroupList
-
-# 基本块
-class Block:
-    # 序列化函数
-    def __bytes__(self):
-        return pickle.dumps(self)
-    # 反序列化函数
-    @staticmethod
-    def from_bytes(b):
-        try:
-            obj = pickle.loads(b)
-            return obj
-        except Exception as e:
-            raise TypeError(f"反序列化失败 Block: {e}")
-    # 写回函数
-    def write_back(self,fp):
-        fp.write(bytes(self))
+from block import Block
 
 # 超级块
 class SuperBlock(Block):
@@ -36,9 +19,8 @@ class SuperBlock(Block):
         self.free_inode_cnt = INODE_NUM                 # 空闲索引节点数
         self.free_inode_bitmap = InodeBitmap()         # 索引节点位图
 
-        # 成组链表法 空闲数据块
-        self.free_data_block_cnt = DATA_BLOCK_NUM       # 空闲数据块数
-        self.block_group_link = GroupList(0)
+        self.free_data_block_cnt = 0
+        self.block_group_link = GroupList.from_existing_stack(0, [0])
 
         self.data_block_size = BLOCK_SIZE               # 数据块大小
         self.inode_size = INODE_SIZE                    # 索引节点大小
@@ -49,6 +31,17 @@ class SuperBlock(Block):
        # TODO: 显示超级块信息
        pass
 
+    def init_data_block_group_link(self, fp):
+        """
+        初始化成组链接法。
+        相对数据块 0 用作链尾标记，不作为普通数据块分配。
+        """
+        self.block_group_link = GroupList.from_existing_stack(0, [0])
+        self.free_data_block_cnt = 0
+
+        for block_id in range(DATA_BLOCK_NUM - 1, 0, -1):
+            self.free_up_data_block(fp, block_id)
+
     def get_data_block_id(self, fp):
         """
         获取一个空闲数据块ID
@@ -58,18 +51,48 @@ class SuperBlock(Block):
         if self.free_data_block_cnt == 0:
             raise Exception("没有空闲空间了")
         
-        flag, temp_id = self.block_group_link.get_free_block()
-        
-        if flag:
+        if self.block_group_link.count > 1:
             self.free_data_block_cnt -= 1
-            return temp_id
-        else: 
-            if temp_id == 0:
-                raise Exception("空闲块链已到末尾")
-            fp.seek((DATA_BLOCK_START_ID + temp_id) * BLOCK_SIZE)     
-            self.block_group_link = GroupList.from_bytes(fp.read(BLOCK_SIZE))
-            self.block_unused_cnt -= 1
-            return temp_id   
+            return self.block_group_link.pop()
+        
+        group_leader_id = self.block_group_link.stack[0]
+
+        if group_leader_id == 0:
+            raise Exception("空闲块链已到末尾")
+        
+        fp.seek((DATA_BLOCK_START_ID + group_leader_id) * BLOCK_SIZE)
+        self.block_group_link = GroupList.from_bytes(fp.read(BLOCK_SIZE))
+
+        self.free_data_block_cnt -= 1
+
+        return group_leader_id
+    
+    def free_up_data_block(self, fp, block_id):
+        """
+        bfree:
+        如果超级块空闲栈未满，直接压栈；
+        如果已满，把当前栈写入 block_id，让 block_id 成为新的组长块。
+        """
+        if block_id <= 0:
+            raise ValueError("数据块 0 用作链尾标记，不能释放")
+
+        if self.block_group_link.has_free_space():
+            self.block_group_link.push(block_id)
+        else:
+            old_group = GroupList.from_existing_stack(
+                block_id,
+                self.block_group_link.stack
+            )
+            old_group.write_back(fp)
+
+            self.block_group_link = GroupList.from_existing_stack(
+                block_id,
+                [block_id]
+            )
+
+        self.free_data_block_cnt += 1
+    
+
 
 
         

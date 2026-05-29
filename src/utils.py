@@ -22,6 +22,6 @@ def split_serializer(b_obj: bytes) -> list:
 def from_serializer(fp,block_num):
     s = b''
     for _ in range(block_num):
-        s += fp.read()
+        s += fp.read(BLOCK_SIZE)
     return s
 

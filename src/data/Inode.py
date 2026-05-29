@@ -1,6 +1,6 @@
 import time
 
-from data import Block
+from block import Block
 from head import INODE_BLOCK_NUM, INODE_SIZE, BLOCK_SIZE, INODE_NUM, ROOT_ID  
 
 # 索引位图表
