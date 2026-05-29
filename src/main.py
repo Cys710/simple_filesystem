@@ -1,45 +1,17 @@
-# """
-# author:Wenquan Yang
-# time:2020/6/12 22:50
-# intro:文件系统实际运行部分
-# """
-# import commands
-# from utils import bar
-# from file_system import FileSystem
-# from file_system import file_system_func
+"""
+    程序的入口
+    1. 实现磁盘的挂载和格式化功能
+"""
 
+from __future__ import annotations
+from init import init
 
-# @file_system_func
-# def running_pfs(fs: FileSystem):
-#     while True:
-#         bar(fs.current_user_name, fs.get_current_path_name())
-#         cmd = input().split()
-#         if cmd[0] == 'exit':
-#             break
-#         try:
-#             func = getattr(commands, cmd[0])
-#             func(fs, *cmd[1:])
-#         except AttributeError:
-#             print("\n命令不支持\n")
-
-
-# def main():
-#     running_pfs()
-
-
-# if __name__ == '__main__':
-#     main()
-
-
-# init file system
-
-from data.data import SuperBlock
-
-def init():
-    # 超级块写入
-    sp = SuperBlock()
-
-    # 索引节点位图写入
-    sp.free_inode_bitmap.write_back()
-
+if __name__ == "__main__":
+    # 初始化磁盘镜像并挂载
+    fs = init()
+    print(f"mounted: {fs.path}")
+    print(f"free inodes: {fs.super_block.free_inode_cnt}")
+    print(f"free data blocks: {fs.super_block.free_data_block_cnt}")
+    print(f"root inode: {fs.root_inode.inode_id}")
+    print(f"root dir: {fs.root_dir.name}")
     

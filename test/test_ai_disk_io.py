@@ -10,7 +10,7 @@ from disk import (
     BLOCK_SIZE,
     DISK_SIZE,
     Disk,
-    DiskError,
+    DiskIOError,
     create_disk,
     format_disk,
     open_disk,
@@ -47,9 +47,9 @@ class TestDiskIO(unittest.TestCase):
             format_disk(path)
 
             with open_disk(path) as fp:
-                with self.assertRaises(DiskError):
+                with self.assertRaises(DiskIOError):
                     read_block(fp, -1)
-                with self.assertRaises(DiskError):
+                with self.assertRaises(DiskIOError):
                     write_block(fp, 1024, b"")
 
     def test_reject_data_larger_than_one_block(self):
@@ -58,7 +58,7 @@ class TestDiskIO(unittest.TestCase):
             format_disk(path)
 
             with open_disk(path) as fp:
-                with self.assertRaises(DiskError):
+                with self.assertRaises(DiskIOError):
                     write_block(fp, 0, b"x" * (BLOCK_SIZE + 1))
 
     def test_disk_wrapper(self):
