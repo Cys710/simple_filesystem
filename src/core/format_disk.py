@@ -19,7 +19,8 @@ from storage.inode_io import read_inode, write_inode
 from storage.object_io import read_object, write_object
 
 from dataStruct.data import DirBlock, SuperBlock  
-from dataStruct import Inode  
+from dataStruct import Inode
+from dataStruct.Inode import DEFAULT_DIR_MODE
 from user import create_root_user
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ def create_root_inode(root_dir_data_block_id: int) -> Inode:
 
     root_inode = Inode(ROOT_ID, ROOT_ID)
     root_inode.is_dir = True
+    root_inode.mode = DEFAULT_DIR_MODE
     root_inode.direct_blocks.append(root_dir_data_block_id)
     root_inode.direct_blocks_size = 1
     root_inode.size = BLOCK_SIZE

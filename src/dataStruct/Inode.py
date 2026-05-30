@@ -26,12 +26,20 @@ class InodeBitmap(Block):
         else:
             self.bitmap[byte_index] &= ~(1 << bit_index)
 
+
+# 权限位沿用 chmod 的三位八进制写法；当前课设只使用 owner 和 others 两段。
+DEFAULT_FILE_MODE = 0o644   # 默认文件权限：owner 可读写，others 可读
+DEFAULT_DIR_MODE = 0o755    # 默认目录权限：owner 可读写执行，others 可读执行
+PRIVATE_DIR_MODE = 0o700    # 私有目录权限：只有 owner 可读写执行
+
 # 索引节点
 class Inode(Block):
 
-    def __init__(self,inode_id,user_id):
+    def __init__(self,inode_id,user_id, mode=None):
         self.inode_id = inode_id                    # 索引节点ID
         self.user_id = user_id                      # 用户ID
+        self.owner_id = user_id                     # 所有者ID
+        self.mode = DEFAULT_FILE_MODE if mode is None else mode
         self.is_dir = False                         # 是否为目录
         self.size = 0                               # 文件大小
         self.direct_blocks = []                     # 直接索引块列表
@@ -39,4 +47,3 @@ class Inode(Block):
         self.indirect_block = None                  # 间接索引块ID
         self.create_time = time.time()              # 创建时间
         self.modify_time = time.time()              # 修改时间
-        self.user_group = {ROOT_ID, user_id}        # 可访问用户

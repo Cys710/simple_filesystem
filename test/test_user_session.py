@@ -86,7 +86,8 @@ class TestUserSession(unittest.TestCase):
             home_inode, home_dir = fs._resolve_dir("/home/alice")
             self.assertTrue(home_inode.is_dir)
             self.assertEqual(home_dir.name, "alice")
-            self.assertEqual(home_inode.user_id, ROOT_ID)
+            self.assertEqual(home_inode.user_id, user_id)
+            self.assertEqual(fs.stat("/home/alice")["mode"], "700")
         finally:
             temp_dir.cleanup()
 
@@ -150,6 +151,64 @@ class TestUserSession(unittest.TestCase):
             fs.touch("note.txt")
             inode, _dir_block = fs._resolve_path("/home/alice/note.txt")
             self.assertEqual(inode.user_id, 1)
+        finally:
+            temp_dir.cleanup()
+
+    def test_private_home_blocks_other_users(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.login("root", DEFAULT_ROOT_PASSWORD)
+            fs.useradd("alice", "alice-pass")
+            fs.useradd("bob", "bob-pass")
+            fs.su("alice", "alice-pass")
+            fs.write_file("private.txt", "secret")
+
+            fs.su("bob", "bob-pass")
+            with self.assertRaises(FileSystemError):
+                fs.cd("/home/alice")
+            with self.assertRaises(FileSystemError):
+                fs.read_file("/home/alice/private.txt")
+
+            fs.su("root", DEFAULT_ROOT_PASSWORD)
+            self.assertEqual(fs.read_file("/home/alice/private.txt"), b"secret")
+        finally:
+            temp_dir.cleanup()
+
+    def test_chmod_can_grant_read_without_write(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.login("root", DEFAULT_ROOT_PASSWORD)
+            fs.useradd("alice", "alice-pass")
+            fs.useradd("bob", "bob-pass")
+            fs.su("alice", "alice-pass")
+            fs.write_file("shared.txt", "hello")
+            fs.chmod("/home/alice", "755")
+            fs.chmod("/home/alice/shared.txt", "644")
+
+            fs.su("bob", "bob-pass")
+            self.assertEqual(fs.read_file("/home/alice/shared.txt"), b"hello")
+            with self.assertRaises(FileSystemError):
+                fs.write_file("/home/alice/shared.txt", "blocked")
+
+            fs.su("alice", "alice-pass")
+            fs.chmod("/home/alice/shared.txt", "600")
+            self.assertEqual(fs.stat("/home/alice/shared.txt")["mode"], "600")
+        finally:
+            temp_dir.cleanup()
+
+    def test_non_owner_cannot_chmod(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.login("root", DEFAULT_ROOT_PASSWORD)
+            fs.useradd("alice", "alice-pass")
+            fs.useradd("bob", "bob-pass")
+            fs.su("alice", "alice-pass")
+            fs.write_file("note.txt", "hello")
+            fs.chmod("/home/alice", "755")
+
+            fs.su("bob", "bob-pass")
+            with self.assertRaises(FileSystemError):
+                fs.chmod("/home/alice/note.txt", "777")
         finally:
             temp_dir.cleanup()
 

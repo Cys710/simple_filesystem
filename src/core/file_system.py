@@ -18,6 +18,7 @@ from storage.object_io import ObjectIOError, pack_object, read_object, write_obj
 
 from dataStruct.data import DirBlock, SuperBlock  
 from dataStruct import Inode  
+from dataStruct.Inode import DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, PRIVATE_DIR_MODE
 from user import User, create_root_user
 
 # 间接索引块 安全存储的最大数据块数量
@@ -55,7 +56,9 @@ class FileSystem:
     # 用户操作接口：ls 返回目录下的 (name, type) 列表
     def ls(self, path: str = ".") -> list[tuple[str, int]]:
 
-        _inode, dir_block = self._resolve_dir(path)
+        inode, dir_block = self._resolve_dir(path)
+        self._check_permission(inode, "r")
+        self._check_permission(inode, "x")
         return dir_block.file_name_and_types()
     
     # mkdir 创建目录，返回新目录的 inode id
@@ -66,13 +69,15 @@ class FileSystem:
         if not name:
             raise FileSystemError("directory name cannot be empty")
         self._ensure_name_available(parent_dir, name)
+        self._check_permission(parent_inode, "w")
+        self._check_permission(parent_inode, "x")
 
         with open_disk(self.path) as fp:
             self.super_block = read_super_block(fp)
             inode_id = self._alloc_inode_id()
             data_block_id = self.super_block.get_data_block_id(fp)
 
-            inode = Inode(inode_id, self._current_user_id())
+            inode = Inode(inode_id, self._current_user_id(), DEFAULT_DIR_MODE)
             inode.is_dir = True
             inode.direct_blocks.append(data_block_id)
             inode.direct_blocks_size = 1
@@ -97,12 +102,14 @@ class FileSystem:
         if not name:
             raise FileSystemError("file name cannot be empty")
         self._ensure_name_available(parent_dir, name)
+        self._check_permission(parent_inode, "w")
+        self._check_permission(parent_inode, "x")
 
         with open_disk(self.path) as fp:
             self.super_block = read_super_block(fp)
             inode_id = self._alloc_inode_id()
 
-            inode = Inode(inode_id, self._current_user_id())
+            inode = Inode(inode_id, self._current_user_id(), DEFAULT_FILE_MODE)
             inode.is_dir = False
 
             parent_dir.add_new_file(name, inode_id)
@@ -118,6 +125,7 @@ class FileSystem:
     def cd(self, path: str) -> str:
 
         inode, dir_block = self._resolve_dir(path)
+        self._check_permission(inode, "x")
         self.cwd_inode = inode
         self.cwd_dir = dir_block
         self.cwd_path = self._normalize_path(path)
@@ -156,6 +164,12 @@ class FileSystem:
         try:
             self._ensure_dir_exists("/home")
             self.mkdir(home_path)
+            home_inode, _home_dir = self._resolve_dir(home_path)
+            home_inode.owner_id = user_id
+            home_inode.user_id = user_id
+            home_inode.mode = PRIVATE_DIR_MODE
+            with open_disk(self.path) as fp:
+                write_inode(fp, home_inode.inode_id, home_inode)
             user = User(username, password, user_id, home_path)
             self.super_block.users[username] = user
             self._write_super_block_to_disk()
@@ -197,6 +211,27 @@ class FileSystem:
             except FileSystemError:
                 pass
 
+    # chmod 修改文件或目录权限，只有 root 或 owner 可修改
+    def chmod(self, path: str, mode: int | str) -> None:
+        inode, _dir_block = self._resolve_path(path)
+        mode_value = self._parse_mode(mode)
+        if not self._is_root_user() and self._current_user_id() != self._inode_owner_id(inode):
+            raise FileSystemError("permission denied")
+        inode.mode = mode_value
+        with open_disk(self.path) as fp:
+            write_inode(fp, inode.inode_id, inode)
+
+    # stat 返回文件或目录的关键元数据
+    def stat(self, path: str) -> dict[str, object]:
+        inode, _dir_block = self._resolve_path(path)
+        return {
+            "inode_id": inode.inode_id,
+            "type": "dir" if inode.is_dir else "file",
+            "owner_id": self._inode_owner_id(inode),
+            "mode": self._mode_to_string(self._inode_mode(inode)),
+            "size": inode.size,
+        }
+
     # open 打开文件，返回文件描述符
     def open(self, path: str, mode: str = "r") -> int:
 
@@ -218,6 +253,11 @@ class FileSystem:
         # 如果路径对应的是一个目录，则不能以文件的方式打开
         if inode.is_dir:
             raise FileSystemError(f"is a directory: {path}")
+
+        if readable:
+            self._check_permission(inode, "r")
+        if writable:
+            self._check_permission(inode, "w")
 
         # 如果打开模式要求截断文件，则将文件内容清空
         if truncate:
@@ -323,6 +363,8 @@ class FileSystem:
     # remove 删除指定路径的文件
     def remove(self, path: str) -> None:
         parent_inode, parent_dir, name = self._resolve_parent(path)
+        self._check_permission(parent_inode, "w")
+        self._check_permission(parent_inode, "x")
         if name in parent_dir.son_dirs:
             raise FileSystemError(f"is a directory: {path}")
         inode_id = parent_dir.son_files.get(name)
@@ -348,6 +390,8 @@ class FileSystem:
             raise FileSystemError("cannot remove root directory")
 
         parent_inode, parent_dir, name = self._resolve_parent(path)
+        self._check_permission(parent_inode, "w")
+        self._check_permission(parent_inode, "x")
         inode_id = parent_dir.son_dirs.get(name)
         if inode_id is None:
             if name in parent_dir.son_files:
@@ -374,9 +418,61 @@ class FileSystem:
 
 
     # 以下是一些内部辅助方法：
-
+    
+    # 当前用户 ID，如果没有用户登录则返回 root 用户 ID
     def _current_user_id(self) -> int:
         return self.current_user.user_id if self.current_user is not None else ROOT_ID
+
+    # # 有效用户 ID，等同于当前用户 ID；如果没有用户登录则返回 root 用户 ID
+    # def _effective_user_id(self) -> int:
+    #     return self.current_user.user_id if self.current_user is not None else ROOT_ID
+
+    # 获取owner_id
+    def _inode_owner_id(self, inode: Inode) -> int:
+        if not hasattr(inode, "owner_id"):
+            inode.owner_id = getattr(inode, "user_id", ROOT_ID)
+        return inode.owner_id
+    
+    # 获取mode
+    def _inode_mode(self, inode: Inode) -> int:
+        if not hasattr(inode, "mode"):
+            inode.mode = DEFAULT_DIR_MODE if inode.is_dir else DEFAULT_FILE_MODE
+        return inode.mode
+
+    # 检查当前用户是否有指定权限，否则抛出权限错误；root 用户拥有所有权限
+    def _check_permission(self, inode: Inode, permission: str) -> None:
+        if self._is_root_user() or self.current_user is None:
+            return
+
+        bit_map = {"r": 4, "w": 2, "x": 1}
+        if permission not in bit_map:
+            raise FileSystemError(f"invalid permission: {permission}")
+
+        mode = self._inode_mode(inode)
+        owner_id = self._inode_owner_id(inode)
+        user_id = self._current_user_id()
+        shift = 6 if user_id == owner_id else 0
+
+        if not ((mode >> shift) & bit_map[permission]):
+            raise FileSystemError("permission denied")
+
+    # 解析mode
+    def _parse_mode(self, mode: int | str) -> int:
+        if isinstance(mode, str):
+            if len(mode) != 3 or any(ch not in "01234567" for ch in mode):
+                raise FileSystemError(f"invalid mode: {mode}")
+            mode_value = int(mode, 8)
+        elif isinstance(mode, int):
+            mode_value = mode
+        else:
+            raise TypeError("mode must be int or str")
+        if mode_value < 0 or mode_value > 0o777:
+            raise FileSystemError(f"invalid mode: {mode}")
+        return mode_value
+
+    # mode 转换为字符串形式的权限表示，例如 0o755 -> "755"
+    def _mode_to_string(self, mode: int) -> str:
+        return format(mode, "03o")
 
     # _write_super_block_to_disk 将当前内存中的超级块写回磁盘
     def _write_super_block_to_disk(self) -> None:
@@ -614,6 +710,7 @@ class FileSystem:
         parts = [part for part in normalized.strip(BASE_NAME).split("/") if part]
         # 逐级解析路径组件，更新 inode 和 dir_block
         for part in parts:
+            self._check_permission(inode, "x")
             # 找子目录
             inode_id = dir_block.son_dirs.get(part) if dir_block else None
             # 没有子目录就找文件

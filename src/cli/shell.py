@@ -94,6 +94,10 @@ class Shell:
                 self._users(args)
             elif cmd == "su":
                 self._su(args)
+            elif cmd == "chmod":
+                self._chmod(args)
+            elif cmd == "stat":
+                self._stat(args)
             elif cmd == "cat":
                 self._cat(args)
             elif cmd == "open":
@@ -228,6 +232,20 @@ class Shell:
         self.fs.su(args[0], args[1])
         self._println(f"switched to {self.fs.whoami()}")
 
+    def _chmod(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 2, "chmod mode path")
+        self.fs.chmod(args[1], args[0])
+
+    def _stat(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 1, "stat path")
+        info = self.fs.stat(args[0])
+        self._println(
+            f"{info['type']} inode={info['inode_id']} "
+            f"owner={info['owner_id']} mode={info['mode']} size={info['size']}"
+        )
+
     # _cat 输出指定文件的内容，参数为文件路径。
     def _cat(self, args: list[str]) -> None:
         self._require_mount()
@@ -334,6 +352,8 @@ class Shell:
         " passwd username new_password\n" \
         " users\n" \
         " su username password\n" \
+        " chmod mode path\n" \
+        " stat path\n" \
         " cat file\n" \
         " open file [mode]\n" \
         " read fd [size]\n" \
