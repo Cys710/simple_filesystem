@@ -13,6 +13,7 @@ from storage.disk import open_disk, read_block, write_block
 from core.format_disk import format_disk, read_super_block, write_super_block
 from storage.inode_io import clear_inode_slot, read_inode, write_inode
 from core.mount import MountedFileSystem, mount
+from dataStruct.open_file import OpenFile, parse_open_mode
 from storage.object_io import ObjectIOError, pack_object, read_object, write_object
 
 from dataStruct.data import DirBlock, SuperBlock  
@@ -34,6 +35,9 @@ class FileSystem:
         self.cwd_inode = mounted.root_inode
         self.cwd_dir = mounted.root_dir
         self.cwd_path = BASE_NAME
+        # 打开文件表，key 是文件描述符，value 是 OpenFile 对象
+        self.open_file_table: dict[int, OpenFile] = {}
+        self.next_fd = 3
 
     # format_and_mount 格式化磁盘并挂载
     @classmethod
@@ -121,73 +125,128 @@ class FileSystem:
     def pwd(self) -> str:
         return self.cwd_path
 
-    # read_file 从指定路径读取文件内容，返回 bytes
-    def read_file(self, path: str) -> bytes:
-        inode, _dir_block = self._resolve_path(path)
+    # open 打开文件，返回文件描述符
+    def open(self, path: str, mode: str = "r") -> int:
+
+        # 解析打开模式，获取读写权限、是否创建新文件、是否截断文件、初始偏移量等信息
+        try:
+            readable, writable, create, truncate, offset = parse_open_mode(mode)
+        except ValueError as exc:
+            raise FileSystemError(str(exc)) from exc
+
+        # 解析路径，获取文件的 inode 和所在目录的 DirBlock
+        try:
+            inode, _dir_block = self._resolve_path(path)
+        except FileSystemError:
+            if not create:
+                raise
+            self.touch(path)
+            inode, _dir_block = self._resolve_path(path)
+
+        # 如果路径对应的是一个目录，则不能以文件的方式打开
         if inode.is_dir:
             raise FileSystemError(f"is a directory: {path}")
 
-        content = bytearray()
-        with open_disk(self.path) as fp:
-            for data_block_id in self._file_data_block_ids(fp, inode):
-                block = read_block(fp, DATA_BLOCK_START_ID + data_block_id)
-                content.extend(block)
+        # 如果打开模式要求截断文件，则将文件内容清空
+        if truncate:
+            self._write_file_inode(inode.inode_id, b"")
+            inode = self._read_inode(inode.inode_id)
 
-        return bytes(content[: inode.size])
+        # 分配一个新的文件描述符，并在打开文件表
+        # 记录该文件的 inode id、路径、打开模式、当前偏移量等信息
+        fd = self.next_fd
+        self.next_fd += 1
+        if offset < 0:
+            offset = inode.size
 
-    # write_file 向指定路径写入数据，返回写入的字节数。
-    # 如果 append=True，则在文件末尾追加数据；否则覆盖原有内容。
-    def write_file(self, path: str, data: bytes | str, *, append: bool = False) -> int:
-        # 如果 data 是 str，则先编码为 bytes
+        self.open_file_table[fd] = OpenFile(
+            fd=fd,
+            inode_id=inode.inode_id,
+            path=self._normalize_path(path),
+            mode=mode,
+            offset=offset,
+            readable=readable,
+            writable=writable,
+        )
+        return fd
+
+    # close 关闭文件，释放文件描述符
+    def close(self, fd: int) -> None:
+        self._get_open_file(fd)
+        del self.open_file_table[fd]
+
+    # read 从文件描述符对应的文件中读取数据，返回 bytes
+    def read(self, fd: int, size: int = -1) -> bytes:
+        open_file = self._get_open_file(fd)
+        if not open_file.readable:
+            raise FileSystemError(f"file descriptor is not readable: {fd}")
+        if size is None:
+            size = -1
+        if size < -1:
+            raise FileSystemError("read size cannot be less than -1")
+
+        data = self._read_file_inode(open_file.inode_id)
+        start = min(open_file.offset, len(data))
+        end = len(data) if size == -1 else min(start + size, len(data))
+        chunk = data[start:end]
+        open_file.offset = end
+        return chunk
+    
+    # write 向文件描述符对应的文件中写入数据，返回写入的字节数
+    def write(self, fd: int, data: bytes | str) -> int:
+        open_file = self._get_open_file(fd)
+        if not open_file.writable:
+            raise FileSystemError(f"file descriptor is not writable: {fd}")
         if isinstance(data, str):
             data = data.encode("utf-8")
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("data must be bytes or str")
 
-        inode, _dir_block = self._resolve_path(path)
-        if inode.is_dir:
-            raise FileSystemError(f"is a directory: {path}")
+        old_data = self._read_file_inode(open_file.inode_id)
+        offset = open_file.offset
+        if offset > len(old_data):
+            old_data = old_data + b"\x00" * (offset - len(old_data))
 
-        # 计算新内容的总字节数，并根据块大小计算需要的数据块数量
-        old_data = self.read_file(path) if append else b""
-        new_data = old_data + bytes(data)
-        needed_blocks = self._required_block_count(len(new_data))
-
-        if needed_blocks > self._max_file_block_count():
-            max_size = self._max_file_block_count() * BLOCK_SIZE
-            raise FileSystemError(f"file is too large: max {max_size} bytes")
-
-        with open_disk(self.path) as fp:
-            self.super_block = read_super_block(fp)
-            inode = read_inode(fp, inode.inode_id)
-            data_block_ids = self._file_data_block_ids(fp, inode)
-
-            # 根据需要的数据块数量调整 inode 的直接索引块列表，分配或释放数据块
-            while len(data_block_ids) < needed_blocks:
-                data_block_ids.append(self.super_block.get_data_block_id(fp))
-
-            # 如果新内容需要的数据块比原来少，则释放多余的数据块
-            while len(data_block_ids) > needed_blocks:
-                released_block_id = data_block_ids.pop()
-                self.super_block.free_up_data_block(fp, released_block_id)
-            self._set_file_data_block_ids(fp, inode, data_block_ids)
-            
-            # 将新内容写入 inode 的直接索引块对应的数据块中
-            for index, data_block_id in enumerate(data_block_ids):
-                start = index * BLOCK_SIZE
-                end = start + BLOCK_SIZE
-                write_block(
-                    fp,
-                    DATA_BLOCK_START_ID + data_block_id,
-                    new_data[start:end],
-                )
-
-            inode.size = len(new_data)
-            inode.direct_blocks_size = len(inode.direct_blocks)
-            write_inode(fp, inode.inode_id, inode)
-            write_super_block(fp, self.super_block)
-
+        new_data = old_data[:offset] + bytes(data) + old_data[offset + len(data):]
+        self._write_file_inode(open_file.inode_id, new_data)
+        open_file.offset = offset + len(data)
         return len(data)
+
+    # seek 调整文件描述符对应的文件的当前偏移量，返回新的偏移量
+    def seek(self, fd: int, offset: int, whence: int = 0) -> int:
+        open_file = self._get_open_file(fd)
+        inode = self._read_inode(open_file.inode_id)
+
+        if whence == 0:
+            new_offset = offset
+        elif whence == 1:
+            new_offset = open_file.offset + offset
+        elif whence == 2:
+            new_offset = inode.size + offset
+        else:
+            raise FileSystemError(f"invalid whence: {whence}")
+
+        if new_offset < 0:
+            raise FileSystemError("file offset cannot be negative")
+        open_file.offset = new_offset
+        return new_offset
+
+    # read_file 从指定路径读取文件内容，返回 bytes
+    def read_file(self, path: str) -> bytes:
+        fd = self.open(path, "r")
+        try:
+            return self.read(fd)
+        finally:
+            self.close(fd)
+
+    # write_file 向指定路径写入数据，返回写入的字节数。
+    # 如果 append=True，则在文件末尾追加数据；否则覆盖原有内容。
+    def write_file(self, path: str, data: bytes | str, *, append: bool = False) -> int:
+        fd = self.open(path, "a" if append else "w")
+        try:
+            return self.write(fd, data)
+        finally:
+            self.close(fd)
 
     # remove 删除指定路径的文件
     def remove(self, path: str) -> None:
@@ -243,6 +302,63 @@ class FileSystem:
 
 
     # 以下是一些内部辅助方法：
+    # 根据文件描述符获取对应的 OpenFile 对象
+    def _get_open_file(self, fd: int) -> OpenFile:
+        try:
+            return self.open_file_table[fd]
+        except KeyError as exc:
+            raise FileSystemError(f"invalid file descriptor: {fd}") from exc
+
+    # 从磁盘读取指定文件 inode 的内容，返回 bytes
+    def _read_file_inode(self, inode_id: int) -> bytes:
+        inode = self._read_inode(inode_id)
+        if inode.is_dir:
+            raise FileSystemError(f"inode {inode_id} is a directory")
+
+        content = bytearray()
+        with open_disk(self.path) as fp:
+            for data_block_id in self._file_data_block_ids(fp, inode):
+                block = read_block(fp, DATA_BLOCK_START_ID + data_block_id)
+                content.extend(block)
+
+        return bytes(content[: inode.size])
+
+    # 将数据写入指定文件 inode，更新 inode 的直接索引和间接索引，并写回磁盘
+    def _write_file_inode(self, inode_id: int, data: bytes | bytearray) -> None:
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("data must be bytes or bytearray")
+        data = bytes(data)
+        needed_blocks = self._required_block_count(len(data))
+
+        if needed_blocks > self._max_file_block_count():
+            max_size = self._max_file_block_count() * BLOCK_SIZE
+            raise FileSystemError(f"file is too large: max {max_size} bytes")
+
+        with open_disk(self.path) as fp:
+            self.super_block = read_super_block(fp)
+            inode = read_inode(fp, inode_id)
+            if inode.is_dir:
+                raise FileSystemError(f"inode {inode_id} is a directory")
+
+            data_block_ids = self._file_data_block_ids(fp, inode)
+
+            while len(data_block_ids) < needed_blocks:
+                data_block_ids.append(self.super_block.get_data_block_id(fp))
+
+            while len(data_block_ids) > needed_blocks:
+                released_block_id = data_block_ids.pop()
+                self.super_block.free_up_data_block(fp, released_block_id)
+            self._set_file_data_block_ids(fp, inode, data_block_ids)
+
+            for index, data_block_id in enumerate(data_block_ids):
+                start = index * BLOCK_SIZE
+                end = start + BLOCK_SIZE
+                write_block(fp, DATA_BLOCK_START_ID + data_block_id, data[start:end])
+
+            inode.size = len(data)
+            inode.direct_blocks_size = len(inode.direct_blocks)
+            write_inode(fp, inode.inode_id, inode)
+            write_super_block(fp, self.super_block)
 
     # _alloc_inode_id 从超级块的 inode 位图中分配一个新的 inode id
     def _alloc_inode_id(self) -> int:

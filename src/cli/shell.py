@@ -82,8 +82,16 @@ class Shell:
                 self._pwd_command(args)
             elif cmd == "cat":
                 self._cat(args)
+            elif cmd == "open":
+                self._open(args)
+            elif cmd == "read":
+                self._read(args)
             elif cmd == "write":
                 self._write(args)
+            elif cmd == "seek":
+                self._seek(args)
+            elif cmd == "close":
+                self._close(args)
             elif cmd == "append":
                 self._append(args)
             elif cmd == "rm":
@@ -162,16 +170,54 @@ class Shell:
         self._expect_exact_args(args, 0, "pwd")
         self._println(self.fs.pwd())
 
+    # _cat 输出指定文件的内容，参数为文件路径。
     def _cat(self, args: list[str]) -> None:
         self._require_mount()
         self._expect_exact_args(args, 1, "cat file")
         data = self.fs.read_file(args[0])
         self._println(data.decode("utf-8", errors="replace"))
 
+    # _open 打开指定文件并返回文件描述符，参数为文件路径和可选的打开模式（默认为 "r"）。
+    def _open(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_min_args(args, 1, "open file [mode]")
+        self._expect_max_args(args, 2, "open file [mode]")
+        fd = self.fs.open(args[0], args[1] if len(args) == 2 else "r")
+        self._println(str(fd))
+
+    # _read 从指定文件描述符读取数据，参数为 fd 和可选的读取大小（默认为 -1，表示读取全部）。
+    def _read(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_min_args(args, 1, "read fd [size]")
+        self._expect_max_args(args, 2, "read fd [size]")
+        fd = self._parse_fd(args[0])
+        size = int(args[1]) if len(args) == 2 else -1
+        data = self.fs.read(fd, size)
+        self._println(data.decode("utf-8", errors="replace"))
+
+    # _write 向指定文件描述符或文件路径写入文本，参数为 fd 或 file 和要写入的文本。
     def _write(self, args: list[str]) -> None:
         self._require_mount()
         self._expect_min_args(args, 2, "write file text")
-        self.fs.write_file(args[0], " ".join(args[1:]))
+        if self._is_int(args[0]):
+            self.fs.write(self._parse_fd(args[0]), " ".join(args[1:]))
+        else:
+            self.fs.write_file(args[0], " ".join(args[1:]))
+
+    # _seek 在指定文件描述符上移动文件指针，参数为 fd、offset 和可选的 whence（默认为 0，表示从文件开头）。
+    def _seek(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_min_args(args, 2, "seek fd offset [whence]")
+        self._expect_max_args(args, 3, "seek fd offset [whence]")
+        whence = int(args[2]) if len(args) == 3 else 0
+        offset = self.fs.seek(self._parse_fd(args[0]), int(args[1]), whence)
+        self._println(str(offset))
+
+    # _close 关闭指定文件描述符，参数为 fd。
+    def _close(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 1, "close fd")
+        self.fs.close(self._parse_fd(args[0]))
 
     def _append(self, args: list[str]) -> None:
         self._require_mount()
@@ -201,6 +247,19 @@ class Shell:
     def _pwd(self) -> str:
         return self.fs.pwd() if self.fs is not None else "-"
 
+    def _parse_fd(self, text: str) -> int:
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise FileSystemError(f"invalid fd: {text}") from exc
+
+    def _is_int(self, text: str) -> bool:
+        try:
+            int(text)
+        except ValueError:
+            return False
+        return True
+
     # _help 输出可用命令的帮助信息。
     def _help(self) -> None:
         self._println("commands: \n" \
@@ -210,7 +269,12 @@ class Shell:
         " mkdir dir_name\n" \
         " touch file_name\n" \
         " cat file\n" \
+        " open file [mode]\n" \
+        " read fd [size]\n" \
         " write file text\n" \
+        " write fd text\n" \
+        " seek fd offset [whence]\n" \
+        " close fd\n" \
         " append file text\n" \
         " rm file\n" \
         " rmdir [-r] directory\n" \
