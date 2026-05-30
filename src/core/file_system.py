@@ -18,6 +18,7 @@ from storage.object_io import ObjectIOError, pack_object, read_object, write_obj
 
 from dataStruct.data import DirBlock, SuperBlock  
 from dataStruct import Inode  
+from user import User, create_root_user
 
 # 间接索引块 安全存储的最大数据块数量
 MAX_INDIRECT_BLOCK_IDS = BLOCK_SIZE // 4 - 2
@@ -32,6 +33,8 @@ class FileSystem:
     def __init__(self, mounted: MountedFileSystem):
         self.path = mounted.path
         self.super_block = mounted.super_block
+        # self._ensure_user_table()
+        self.current_user: User | None = None
         self.cwd_inode = mounted.root_inode
         self.cwd_dir = mounted.root_dir
         self.cwd_path = BASE_NAME
@@ -70,7 +73,7 @@ class FileSystem:
             inode_id = self._alloc_inode_id()
             data_block_id = self.super_block.get_data_block_id(fp)
 
-            inode = Inode(inode_id, ROOT_ID)
+            inode = Inode(inode_id, self._current_user_id())
             inode.is_dir = True
             inode.direct_blocks.append(data_block_id)
             inode.direct_blocks_size = 1
@@ -100,7 +103,7 @@ class FileSystem:
             self.super_block = read_super_block(fp)
             inode_id = self._alloc_inode_id()
 
-            inode = Inode(inode_id, ROOT_ID)
+            inode = Inode(inode_id, self._current_user_id())
             inode.is_dir = False
 
             parent_dir.add_new_file(name, inode_id)
@@ -124,6 +127,22 @@ class FileSystem:
     # pwd 返回当前目录的绝对路径
     def pwd(self) -> str:
         return self.cwd_path
+
+    # login 校验用户名和密码，并记录当前用户会话
+    def login(self, username: str, password: str) -> None:
+        # self._ensure_user_table()
+        user = self.super_block.users.get(username)
+        if user is None or not user.login(username, password):
+            raise FileSystemError("invalid username or password")
+        self.current_user = user
+
+    # logout 清除当前用户会话
+    def logout(self) -> None:
+        self.current_user = None
+
+    # whoami 返回当前登录用户名；未登录时返回 guest
+    def whoami(self) -> str:
+        return self.current_user.name if self.current_user is not None else "guest"
 
     # open 打开文件，返回文件描述符
     def open(self, path: str, mode: str = "r") -> int:
@@ -302,6 +321,17 @@ class FileSystem:
 
 
     # 以下是一些内部辅助方法：
+
+    # # 确保超级块里存在用户表。旧磁盘镜像可能没有这个字段。
+    # def _ensure_user_table(self) -> None:
+    #     if not hasattr(self.super_block, "users") or self.super_block.users is None:
+    #         self.super_block.users = {}
+    #     if "root" not in self.super_block.users:
+    #         self.super_block.users["root"] = create_root_user()
+
+    def _current_user_id(self) -> int:
+        return self.current_user.user_id if self.current_user is not None else ROOT_ID
+
     # 根据文件描述符获取对应的 OpenFile 对象
     def _get_open_file(self, fd: int) -> OpenFile:
         try:

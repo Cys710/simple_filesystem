@@ -80,6 +80,12 @@ class Shell:
                 self._cd(args)
             elif cmd == "pwd":
                 self._pwd_command(args)
+            elif cmd == "login":
+                self._login(args)
+            elif cmd == "logout":
+                self._logout(args)
+            elif cmd == "who":
+                self._whoami(args)
             elif cmd == "cat":
                 self._cat(args)
             elif cmd == "open":
@@ -169,6 +175,27 @@ class Shell:
         self._require_mount()
         self._expect_exact_args(args, 0, "pwd")
         self._println(self.fs.pwd())
+
+    # _login 登录用户，参数为用户名和密码。
+    def _login(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 2, "login username password")
+        self.fs.login(args[0], args[1])
+        self._println(f"logged in as {self.fs.whoami()}")
+
+    # _logout 注销当前用户，参数必须为空。
+    def _logout(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 0, "logout")
+        old_user = self.fs.whoami()
+        self.fs.logout()
+        self._println(f"logged out {old_user}")
+
+    # _whoami 输出当前登录的用户名，参数必须为空。
+    def _whoami(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 0, "whoami")
+        self._println(self.fs.whoami())
 
     # _cat 输出指定文件的内容，参数为文件路径。
     def _cat(self, args: list[str]) -> None:
@@ -268,6 +295,9 @@ class Shell:
         " ls [path]\n" \
         " mkdir dir_name\n" \
         " touch file_name\n" \
+        " login username password\n" \
+        " logout\n" \
+        " who\n" \
         " cat file\n" \
         " open file [mode]\n" \
         " read fd [size]\n" \

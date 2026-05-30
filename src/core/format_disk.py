@@ -20,6 +20,7 @@ from storage.object_io import read_object, write_object
 
 from dataStruct.data import DirBlock, SuperBlock  
 from dataStruct import Inode  
+from user import create_root_user
 
 @dataclass(frozen=True)
 class RootInitResult:
@@ -87,6 +88,7 @@ def build_super_block(fp: BinaryIO) -> SuperBlock:
 
     super_block = SuperBlock()
     super_block.init_data_block_group_link(fp)
+    super_block.users = {"root": create_root_user()}
     return super_block
 
 # 将超级块写入磁盘的第0块

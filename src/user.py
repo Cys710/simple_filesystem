@@ -1,9 +1,13 @@
 import hashlib
 
+DEFAULT_ROOT_PASSWORD = "123456"
+
+
 def md5(text: str):
     m = hashlib.md5()
     m.update(text.encode("utf-8"))
     return m.hexdigest()
+
 
 class User:
     def __init__(self, name, password, user_id):
@@ -19,8 +23,15 @@ class User:
     def name(self):
         return self._name
 
-    def login(self, name, password, root_user=False):
-        return name == self._name and (root_user or md5(password) == self._password)
+    def verify_password(self, password):
+        return md5(password) == self._password
+
+    def login(self, name, password):
+        return name == self._name and self.verify_password(password)
 
     def __str__(self):
-        print(self.name, self.user_id, self._password)
+        return f"{self.name} {self.user_id} {self._password}"
+
+
+def create_root_user():
+    return User("root", DEFAULT_ROOT_PASSWORD, 0)
