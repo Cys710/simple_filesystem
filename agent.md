@@ -1,404 +1,739 @@
 # Agent Guide
 
-## Project Overview
+## 项目定位
 
-This repository is a small Python implementation of a simulated file management system / file system. The current code models low-level file-system concepts such as a super block, inode bitmap, inode records, directory blocks, serialized disk blocks, and grouped free data-block management.
-
-The codebase is still in an early stage. Some modules contain commented-out legacy entrypoint code, several Chinese comments appear with mojibake/encoding corruption, and `src/init.py` is currently untracked in git.
-
-## Repository Layout
-
-- `src/head.py`: Global constants for the simulated disk layout, such as disk size, block size, inode count, data-block count, root id, and display constants.
-- `src/data/block.py`: Base `Block` class using `pickle` serialization and a `write_back(fp)` helper.
-- `src/data/groupList.py`: `GroupList`, a stack-like structure for grouped free data-block management.
-- `src/data/Inode.py`: `InodeBitmap` and `Inode` data structures.
-- `src/data/data.py`: `SuperBlock` and `DirBlock`; `SuperBlock` owns inode/data-block metadata and allocation/free logic.
-- `src/disk.py`: Fixed-size simulated disk block IO helpers and `Disk` wrapper.
-- `src/object_io.py`: Object serialization/deserialization helpers for objects stored in full disk blocks.
-- `src/inode_io.py`: Inode slot IO helpers for storing 256-byte inode entries inside inode blocks.
-- `src/utils.py`: Serialization helpers that split pickled data into block-sized chunks.
-- `src/user.py`: Simple `User` model using MD5 password hashing.
-- `src/main.py`: Currently contains mostly commented legacy shell/entrypoint code plus a partial `init()` function.
-- `src/init.py`: Disk image initialization/formatting helpers. This file is currently untracked.
-- `test/test_group_list.py`: Unit tests for `GroupList` and `SuperBlock` free data-block behavior.
-- `docs/`: Present but currently empty.
-
-## Development Environment
-
-The project currently uses only the Python standard library. No dependency manager or requirements file is present.
-
-Recommended Python command:
-
-```powershell
-python -m unittest discover -s test
-```
-
-If import errors occur while running individual files, note that the tests manually add both `src` and `src/data` to `sys.path`. Several source modules also use flat imports such as `from block import Block` and `from head import ...`, so running from the project root with the same import path setup matters.
-
-## Current Behavior
-
-The best-covered behavior is grouped free data-block allocation:
-
-- `SuperBlock.init_data_block_group_link(fp)` initializes the free data-block group link.
-- Data block id `0` is reserved and should not be allocated.
-- `SuperBlock.get_data_block_id(fp)` allocates one free data block.
-- `SuperBlock.free_up_data_block(fp, block_id)` releases a data block back to the free list.
-- `GroupList` enforces a maximum stack size of `FREE_BLOCK_CNT`.
-
-The tests check:
-
-- Initial free-block count.
-- Allocation uniqueness.
-- Allocation until empty.
-- Freeing and reallocating blocks.
-- Group leader transitions.
-- Boundary cases for empty, full, and oversized `GroupList` stacks.
-
-## Important Constants
-
-From `src/head.py`:
-
-- Disk size: `4 * 1024 * 1024` bytes.
-- Block size: `4096` bytes.
-- Total blocks: `1024`.
-- Super block count: `1`.
-- Inode block count: `128`.
-- Inode size: `256` bytes.
-- Inode count: `2048`.
-- Data block count: `895`.
-- Data blocks start at block id `129`.
-- Free block group stack limit: `50`.
-- Root id: `0`.
-
-## Known Issues And Cautions
-
-- Many comments and string literals are mojibake. Be careful when editing comments or user-facing messages; preserve behavior first, and fix encoding only as a deliberate cleanup.
-- `src/head.py` appears to contain a malformed assertion string around `INODE_NUM`. If parsing fails, inspect that line first.
-- `src/main.py` is not a working application entrypoint yet. Treat it as partial/legacy code.
-- `src/init.py` creates `disk.img` in the current working directory, while `src/head.py` defines `DISK_NAME = "../FS.pfs"`. Disk image naming/location is not yet consistent.
-- Serialization uses `pickle`, which is suitable for this local simulation but should not be used on untrusted data.
-- `User` stores MD5 password hashes. This is fine for a teaching/demo project but not for production security.
-- `Block.write_back(fp)` writes pickled bytes without padding to a full block. Code that reads full blocks should tolerate trailing zero bytes or ensure fixed-size writes if disk persistence becomes stricter.
-
-## Git Notes
-
-Current observed status:
+FMS 是一个用 Python 实现的教学型模拟文件系统。项目目标可以概括为：
 
 ```text
-?? src/disk.py
-?? src/object_io.py
-?? src/inode_io.py
-?? src/init.py
+在一个固定大小的磁盘镜像中，实现多用户、多目录、可持久化的类 Unix 文件系统。
 ```
 
-Do not remove or overwrite untracked/user changes unless explicitly asked.
+当前代码已经具备底层磁盘块读写、对象序列化、inode 槽位读写、磁盘格式化、挂载、根目录初始化，以及基础 shell 命令雏形。下一阶段的重点不是继续堆命令，而是把“用户身份、目录树、权限、文件内容、删除回收、测试”这几条主线补完整。
 
-## Three-Layer Bring-Up Plan
+## 当前项目结构
 
-The next development goal is not to implement many shell commands at once. The priority is to connect the whole program end to end through three layers:
+- `src/head.py`：全局常量，定义磁盘大小、块大小、inode 区、数据区、文件类型、根目录、颜色等。
+- `src/storage/disk.py`：固定大小磁盘镜像和块级 IO，包括 `create_disk`、`open_disk`、`read_block`、`write_block`。
+- `src/storage/object_io.py`：把 Python 对象序列化后写入一个或多个完整磁盘块。
+- `src/storage/inode_io.py`：把 inode 写入 inode 区的 256 字节槽位，避免覆盖同一块内的其他 inode。
+- `src/dataStruct/Inode.py`：`InodeBitmap` 和 `Inode` 数据结构。
+- `src/dataStruct/data.py`：`SuperBlock` 和 `DirBlock`，包含空闲 inode、空闲数据块、目录项等核心元数据。
+- `src/dataStruct/groupList.py`：成组链接法管理空闲数据块。
+- `src/core/format_disk.py`：创建磁盘镜像、初始化超级块、空闲块链、根 inode 和根目录。
+- `src/core/mount.py`：挂载磁盘镜像并读取超级块和根目录。
+- `src/core/file_system.py`：面向 shell 的核心 API，目前已有 `ls`、`mkdir`、`touch`、`cd`、`pwd`。
+- `src/cli/shell.py`：交互式 shell，负责命令解析和调用 `FileSystem`。
+- `src/user.py`：简单用户模型，当前只有用户名、MD5 密码和用户 id。
+- `src/main.py`：入口文件或历史入口代码。
+- `test/test_group_list.py`：成组链接法和数据块分配相关单元测试。
+- `docs/`：预留文档目录。
+
+## 当前已实现能力
+
+### 磁盘与块 IO
+
+项目使用固定大小磁盘镜像：
+
+- 磁盘大小：`4MB`
+- 块大小：`4096B`
+- 总块数：`1024`
+- 超级块：`1` 块
+- inode 区：`128` 块
+- inode 大小：`256B`
+- inode 总数：`2048`
+- 数据块数：`895`
+- 数据区起始块：`129`
+
+`storage.disk` 已经把原始文件包装成块设备，后续上层代码应只通过块 id 读写，而不要在业务逻辑中手动计算任意文件偏移。
+
+### 元数据持久化
+
+项目有两类持久化方式：
+
+1. `object_io.py`：适合 `SuperBlock`、`DirBlock`、`GroupList` 这种完整对象。
+2. `inode_io.py`：专门处理 inode 槽位，每个 inode 只占 256 字节。
+
+注意：不要用 `object_io.py` 直接保存单个 inode，否则容易破坏 inode 区布局。
+
+### 格式化与挂载
+
+`core.format_disk.format_disk()` 现在会：
+
+1. 创建磁盘镜像。
+2. 构造并初始化 `SuperBlock`。
+3. 初始化空闲数据块成组链接。
+4. 分配根目录的数据块。
+5. 标记 root inode 已使用。
+6. 写入 root inode 和 root `DirBlock`。
+7. 写回超级块。
+
+`core.mount.mount()` 会读取超级块、root inode 和 root 目录，返回 `MountedFileSystem`。
+
+### 基础目录操作
+
+`FileSystem` 当前已提供：
+
+- `format_and_mount(path)`
+- `mount(path)`
+- `ls(path=".")`
+- `mkdir(path)`
+- `touch(path)`
+- `cd(path)`
+- `pwd()`
+
+也就是说，项目已经从“纯数据结构”推进到了“能通过 shell 创建目录和空文件”的阶段。
+
+## 当前主要问题
+
+### 1. 编码和注释损坏
+
+大量中文注释出现 mojibake 乱码，影响阅读和维护。建议后续统一将源码保存为 UTF-8，并逐步替换损坏注释。这个清理应单独做，不要混在功能提交里。
+
+### 2. 用户系统尚未接入文件系统
+
+`src/user.py` 只有孤立的 `User` 类，`FileSystem` 创建 inode 时仍基本使用 `ROOT_ID`。目前还没有：
+
+- 用户表持久化。
+- 登录状态。
+- 当前用户上下文。
+- 用户主目录。
+- 用户和文件 owner 的真实关联。
+- 用户组和权限校验。
+
+这与“多用户文件系统”的目标差距最大，应优先设计。
+
+### 3. 多目录能力只是初步可用
+
+当前已有路径解析、`mkdir`、`cd`、`ls`，但目录树还不完整：
+
+- 没有 `.` 和 `..` 目录项的显式语义。
+- 目录删除未实现。
+- 递归删除未实现。
+- 路径错误、重名、文件/目录类型冲突需要更多测试。
+- 目录容量限制没有明确策略。
+- 目录项只记录名称到 inode id，缺少更统一的 entry 结构。
+
+### 4. 文件内容还未实现
+
+`touch` 只创建空文件 inode，没有实现：
+
+- 写文件内容。
+- 读文件内容。
+- 追加写。
+- 文件截断。
+- 文件大小更新。
+- 直接块和间接块分配。
+- 文件删除时释放数据块。
+
+### 5. 权限模型不完整
+
+`Inode` 中有 `user_id` 和 `user_group`，但缺少标准权限字段和检查流程。目前 shell 命令不会根据用户身份拒绝访问。
+
+建议引入简化版 Unix 权限：
 
 ```text
-disk/block IO -> file-system core API -> shell command layer
+owner_id
+group_id
+mode: rwx for owner/group/others
 ```
 
-Once this chain works, new commands and features can be added incrementally.
+目录权限语义建议：
 
-### Layer 1: Disk And Block IO
+- `r`：允许列出目录。
+- `w`：允许在目录中创建、删除、重命名子项。
+- `x`：允许进入目录、路径穿越。
 
-First stabilize the disk-file abstraction. At the moment, disk naming is inconsistent:
+文件权限语义建议：
 
-- `src/head.py` defines `DISK_NAME = "../FS.pfs"`.
-- `src/init.py` writes `disk.img`.
+- `r`：允许读取文件内容。
+- `w`：允许写入或截断文件。
+- `x`：可暂时保留，不一定立即实现执行语义。
 
-Choose one disk path/name before building higher-level behavior.
+### 6. 删除与资源回收缺失
 
-The disk layer should only understand fixed-size block IO. It should not know about inode, directory, file name, user, or shell concepts.
+目前已存在空闲 inode bitmap 和空闲数据块链，但还缺少完整的释放流程：
 
-Suggested minimal API:
+- `rm file`：释放文件数据块、释放 inode、从父目录移除目录项。
+- `rmdir dir`：只允许删除空目录。
+- `rm -r dir`：递归删除目录树。
+- 删除失败时应避免部分写入造成元数据不一致。
+
+### 7. 测试覆盖不足
+
+当前测试主要覆盖 `GroupList` 和空闲数据块行为。后续至少需要补：
+
+- 磁盘块读写测试。
+- 对象 IO 测试。
+- inode 槽位读写测试。
+- format/mount 测试。
+- root 目录持久化测试。
+- `mkdir/touch/ls/cd/pwd` 测试。
+- 路径解析测试。
+- 用户登录和权限测试。
+- 文件读写和删除回收测试。
+
+## 多用户多目录文件系统设计建议
+
+### 数据模型
+
+建议把核心对象扩展为以下几类：
+
+```text
+SuperBlock
+  - inode/data block allocation state
+  - user table location
+  - root inode id
+
+User
+  - user_id
+  - username
+  - password_hash
+  - primary_group_id
+  - home_inode_id
+
+Group
+  - group_id
+  - group_name
+  - member_user_ids
+
+Inode
+  - inode_id
+  - type: file/dir
+  - owner_id
+  - group_id
+  - mode
+  - size
+  - direct_blocks
+  - indirect_block
+  - create_time
+  - modify_time
+
+DirBlock
+  - inode_id
+  - parent_inode_id
+  - entries: name -> DirectoryEntry
+
+DirectoryEntry
+  - name
+  - inode_id
+  - type
+```
+
+当前 `DirBlock.son_files` 和 `DirBlock.son_dirs` 可以继续短期使用，但中期建议合并成 `entries`，这样 `ls`、`rename`、`stat`、权限检查会更统一。
+
+### 推荐目录结构
+
+格式化后建议创建：
+
+```text
+/
+/root
+/home
+/etc
+```
+
+后续新增用户时创建：
+
+```text
+/home/alice
+/home/bob
+```
+
+其中：
+
+- `/` 属于 root。
+- `/root` 只允许 root 访问。
+- `/home` 允许普通用户进入和查看。
+- `/home/<user>` 属于该用户。
+- `/etc` 可用于保存用户表、组表等系统配置对象。
+
+### 用户登录流程
+
+建议 `Shell` 保存当前登录用户，`FileSystem` 保存当前用户上下文：
 
 ```python
-create_disk()
-open_disk()
-read_block(block_id)
-write_block(block_id, data)
-format_disk()
+fs.login(username, password)
+fs.logout()
+fs.current_user
 ```
 
-First validation target:
+命令层可以增加：
 
 ```text
-write block 10 -> reopen/read block 10 -> bytes are unchanged
+login username
+logout
+useradd username
+passwd username
+whoami
 ```
 
-After this step, the project has reliable raw disk-block IO.
+第一阶段可以只支持 root 创建用户；普通用户登录后只能操作自己的 home 目录和有权限访问的目录。
 
-### Layer 2: Object Serialization
+### 权限检查位置
 
-The project has two serialization-related pieces:
+权限检查应放在 `FileSystem` 核心层，而不是 shell 层。shell 只负责解析命令，不能绕过权限。
 
-- `src/data/block.py`: older object-level pickle helper via `Block`.
-- `src/object_io.py`: newer disk-object persistence helper for storing an object into one or more complete blocks.
-
-`Block` supports:
+建议每个公开 API 的开头或路径解析过程中调用：
 
 ```python
-bytes(obj)
-Block.from_bytes(...)
-write_back(fp)
+check_read(inode)
+check_write(inode)
+check_execute(inode)
 ```
 
-The current `Block.write_back(fp)` writes at the file pointer's current position. The newer `object_io.py` layer makes disk persistence explicit:
+典型规则：
+
+- `ls /dir` 需要目录 `r` 和 `x`。
+- `cd /dir` 需要目录 `x`。
+- `touch /dir/a.txt` 需要父目录 `w` 和 `x`。
+- `mkdir /dir/sub` 需要父目录 `w` 和 `x`。
+- `read file` 需要文件 `r`。
+- `write file` 需要文件 `w`。
+- root 用户可以绕过普通权限限制。
+
+## 推荐实现顺序
+
+### 阶段 1：先稳定当前基础链路
+
+目标：让现有单用户、多目录雏形稳定可测。
+
+1. 修复明显语法和导入问题。
+2. 统一磁盘镜像路径，建议默认使用项目根目录下的 `disk.img`。
+3. 为 `format -> mount -> mkdir -> touch -> ls -> cd -> pwd -> restart -> mount -> ls` 增加测试。
+4. 把 `FileSystem` 的路径解析行为测试清楚，包括绝对路径、相对路径、`.`、`..`。
+
+验收标准：
+
+```text
+格式化后创建的目录和文件，退出进程再挂载仍然存在。
+```
+
+### 阶段 2：补文件内容读写
+
+目标：实现真正的文件，而不是只有文件名。
+
+建议新增 API：
 
 ```python
-write_object(fp, start_block_id, obj, block_count=1)
-read_object(fp, start_block_id, block_count=1)
+fs.read_file(path) -> bytes
+fs.write_file(path, data: bytes, append=False)
+fs.truncate(path)
 ```
 
-This layer should connect:
+shell 命令可以先做简化版：
 
 ```text
-Python object -> bytes -> disk block -> bytes -> Python object
+cat file
+write file text...
+append file text...
 ```
 
-Validation target:
+验收标准：
 
 ```text
-create GroupList -> write it to a block -> read it back -> count/stack are unchanged
+write a.txt hello
+cat a.txt
+退出后重新 mount
+cat a.txt 仍输出 hello
 ```
 
-After this step, the project has object persistence.
+### 阶段 3：实现删除和资源回收
 
-Use `object_io.py` for objects that naturally occupy one or more whole blocks, such as:
+目标：避免 inode 和数据块只分配不释放。
 
-- `SuperBlock`
-- `GroupList`
-- `DirBlock`
-
-Do not use whole-block object IO directly for individual inodes. Inodes use fixed 256-byte slots inside inode blocks.
-
-### Inode Slot IO
-
-`src/inode_io.py` handles the special inode layout:
-
-```text
-BLOCK_SIZE = 4096
-INODE_SIZE = 256
-INODES_PER_BLOCK = 16
-```
-
-Each inode lives in a 256-byte slot, and each inode block contains 16 inode slots. The slot format is:
-
-```text
-2-byte payload length + serialized inode payload + zero padding to 256 bytes
-```
-
-Important helpers:
+建议新增：
 
 ```python
-locate_inode(inode_id) -> (block_id, slot_index, offset_in_block)
-pack_inode_slot(inode) -> bytes
-unpack_inode_slot(slot) -> inode
-write_inode(fp, inode_id, inode)
-read_inode(fp, inode_id)
-clear_inode_slot(fp, inode_id)
+fs.rm(path)
+fs.rmdir(path)
+fs.unlink(path)
+fs.free_inode(inode_id)
+fs.free_data_blocks(inode)
 ```
 
-The inode location formula is:
-
-```python
-inode_block_offset = inode_id // INODES_PER_BLOCK
-slot_index = inode_id % INODES_PER_BLOCK
-block_id = INODE_BLOCK_START_ID + inode_block_offset
-offset = slot_index * INODE_SIZE
-```
-
-Examples:
+验收标准：
 
 ```text
-inode_id 0  -> block 1, slot 0,  offset 0
-inode_id 1  -> block 1, slot 1,  offset 256
-inode_id 15 -> block 1, slot 15, offset 3840
-inode_id 16 -> block 2, slot 0,  offset 0
+创建文件占用 inode/data block
+删除文件后 free_inode_cnt/free_data_block_cnt 回升
+重新创建文件可复用释放的资源
 ```
 
-This layer is intentionally different from `object_io.py`: `object_io.py` writes complete blocks, while `inode_io.py` reads/modifies one 256-byte slot inside a block and preserves the neighboring 15 slots.
+### 阶段 4：接入用户系统
 
-### Layer 3: Format And Mount
+目标：从单 root 模式进入多用户模式。
 
-Build a real `format_disk()` flow before adding commands. The minimum useful format process is:
+建议先实现最小闭环：
+
+1. 格式化时创建 root 用户。
+2. 用户表持久化到固定位置，或通过 `/etc/users` 管理。
+3. 支持 `login`、`logout`、`whoami`。
+4. 支持 `useradd`，自动创建 `/home/<username>`。
+5. 新建文件和目录的 owner 是当前用户。
+
+验收标准：
 
 ```text
-1. Create the 4MB disk file.
-2. Create a SuperBlock.
-3. Initialize the free data-block group link.
-4. Initialize the inode bitmap.
-5. Create the root inode.
-6. Create the root DirBlock.
-7. Write the SuperBlock to block 0.
-8. Write the root inode and root directory to their planned locations.
+root 创建 alice
+alice 登录
+pwd 默认进入 /home/alice
+alice 创建的文件 owner_id 是 alice 的 user_id
+重启挂载后用户和 home 目录仍存在
 ```
 
-Then add a matching `mount()` or `load_file_system()` flow:
+### 阶段 5：实现权限
+
+目标：不同用户不能随意读写彼此文件。
+
+建议先实现 `chmod` 的数字模式：
 
 ```text
-1. Open the disk file.
-2. Read the SuperBlock from block 0.
-3. Load enough root metadata to serve basic operations.
+chmod 755 dir
+chmod 644 file
 ```
 
-Validation target:
+再实现：
 
 ```text
-format_disk()
-mount()
-confirm free_data_block_cnt is correct
-confirm root inode/root directory can be read
+chown user file
+chgrp group file
 ```
 
-After this step, the file system can be initialized and reopened.
-
-### Inode Allocation
-
-Next, expose inode operations through the file-system core layer. `InodeBitmap` exists, but the project still needs clear high-level methods.
-
-Suggested API:
-
-```python
-alloc_inode(user_id) -> inode_id
-free_inode(inode_id)
-read_inode(inode_id) -> Inode
-write_inode(inode)
-```
-
-Validation target:
+验收标准：
 
 ```text
-alloc_inode() returns an unused inode id
-write_inode()
-read_inode()
-read inode_id/user_id/is_dir match the written object
+alice 的私有目录 bob 不能 cd
+alice 给文件设置 644 后 bob 可以读但不能写
+root 可以访问所有路径
 ```
 
-After this step, metadata allocation is available.
+### 阶段 6：完善目录操作
 
-### Root Directory Bring-Up
+目标：让多目录行为接近真实文件系统。
 
-Use `DirBlock` to bring up only the root directory first. Do not start with recursive paths or a large command set.
-
-Suggested API:
-
-```python
-load_root_dir()
-save_root_dir(dir_block)
-list_dir("/")
-create_file("/", name)
-create_dir("/", name)
-```
-
-At this stage, file content can stay empty. Creating a file only needs to:
+建议补：
 
 ```text
-allocate inode -> write inode -> add name/inode_id to root DirBlock -> save root DirBlock
+mv old new
+cp src dst
+rename old new
+tree [path]
+stat path
 ```
 
-Validation target:
+其中 `stat` 对调试很有价值，建议优先实现。
+
+## 开发约定
+
+### 分层原则
+
+保持三层边界清楚：
 
 ```text
-pfs> ls
-pfs> mkdir test
-pfs> touch a.txt
-pfs> ls
-test  a.txt
+storage 层：只关心磁盘块和对象读写。
+core 层：负责 inode、目录、用户、权限、文件内容等文件系统语义。
+cli 层：只解析命令并展示结果。
 ```
 
-After this step, the program has its first end-to-end path from shell intent to persisted file-system metadata.
+不要在 shell 中直接操作 `SuperBlock`、`Inode`、`DirBlock`，否则后续权限和一致性很难维护。
 
-### FileSystem Core API
+### 持久化原则
 
-Create or restore a `FileSystem` class as the middle layer. The shell should call this class instead of directly manipulating `SuperBlock`, `Inode`, `DirBlock`, or disk blocks.
-
-Suggested public API:
-
-```python
-class FileSystem:
-    def format(self): ...
-    def mount(self): ...
-    def ls(self, path="."): ...
-    def mkdir(self, path): ...
-    def touch(self, path): ...
-    def cd(self, path): ...
-    def pwd(self): ...
-```
-
-Expected call flow:
+任何修改元数据的操作，都要明确写回：
 
 ```text
-shell command
-    -> FileSystem.mkdir("abc")
-        -> alloc_inode()
-        -> write_inode()
-        -> update DirBlock
-        -> write_block()
+修改 inode -> write_inode
+修改 DirBlock -> write_object
+修改 SuperBlock -> write_super_block
 ```
 
-Keep shell parsing thin. Put real behavior in `FileSystem` so later commands reuse the same core logic.
+如果一次操作涉及多个对象，建议固定写回顺序，并在测试中覆盖失败前后的状态。
 
-### Shell Command Layer
+### 路径解析原则
 
-`src/main.py` contains a commented legacy shell loop. For the first working shell, keep parsing simple:
+路径解析建议统一在 `FileSystem` 中完成，并支持：
 
-```python
-cmd = input("pfs> ").split()
+```text
+/
+.
+..
+相对路径
+绝对路径
+连续斜杠
+尾部斜杠
 ```
 
-Start with only the commands needed to prove the chain:
+创建文件或目录时，先解析父目录，再检查名称合法性和权限。
+
+### 测试原则
+
+每个核心能力都应有“进程内测试”和“重新挂载测试”：
+
+```text
+format
+operation
+assert
+mount again
+assert again
+```
+
+文件系统最容易出错的地方不是内存状态，而是写回和重新挂载后的状态。
+
+## 近期最值得做的事情
+
+按优先级排序：
+
+1. 修复并测试当前 format/mount/shell 基础链路。
+2. 为 `FileSystem.mkdir/touch/ls/cd/pwd` 增加单元测试。
+3. 统一路径和编码，清理损坏注释。
+4. 实现文件内容读写。
+5. 实现删除和资源回收。
+6. 设计并持久化用户表。
+7. 接入登录态和用户 home 目录。
+8. 增加 owner/group/mode 权限字段。
+9. 在所有公开 `FileSystem` API 中做权限检查。
+10. 扩展 shell 命令并补充端到端测试。
+
+## 建议的第一个里程碑
+
+第一个真正完整的里程碑建议定义为：
 
 ```text
 format
 mount
-ls
-mkdir name
-touch name
-pwd
+mkdir /home
+mkdir /home/alice
+touch /home/alice/a.txt
+write /home/alice/a.txt hello
 exit
+mount
+cat /home/alice/a.txt
 ```
 
-The key persistence test is:
+如果重新挂载后仍能正确看到目录、文件和内容，就说明底层持久化链路已经可靠。
+
+第二个里程碑再加入用户：
 
 ```text
-format -> mount -> mkdir test -> touch a.txt -> ls
-exit
-restart -> mount -> ls
+format
+login root
+useradd alice
+login alice
+pwd                    # /home/alice
+touch note.txt
+write note.txt hello
+logout
+login root
+stat /home/alice/note.txt
 ```
 
-The second `ls` should still show `test` and `a.txt`.
-
-### Recommended Implementation Order
-
-Use this order to avoid building features on an unstable foundation:
-
-1. Disk block read/write.
-2. Object serialization read/write.
-3. `format_disk()` writes a usable `SuperBlock`.
-4. `mount()` reads the `SuperBlock`.
-5. Inode allocation and inode read/write.
-6. Root directory read/write.
-7. `FileSystem.ls`, `FileSystem.mkdir`, and `FileSystem.touch`.
-8. Shell commands call `FileSystem`.
-9. Add recursive paths, file content, delete operations, permissions, and users later.
-
-The first complete milestone should be:
+第三个里程碑加入权限：
 
 ```text
-format -> mount -> mkdir -> ls -> exit -> restart -> mount -> ls
+login alice
+chmod 600 private.txt
+login bob
+cat /home/alice/private.txt   # permission denied
+login root
+cat /home/alice/private.txt   # allowed
 ```
 
-Once that path works, each new feature can be added by extending the same three-layer pipeline.
+## 挂载后的内存运行态
 
-## Suggested Next Steps
+这个项目不应该只实现磁盘镜像部分。真实文件系统在挂载后，还会有一批驻留内存的运行态结构。磁盘负责长期保存，内存负责当前会话的操作状态和访问加速。
 
-- Make imports package-consistent, preferably through `src` package imports.
-- Fix or normalize source-file encoding and corrupted comments.
-- Decide on one disk image path/name.
-- Finish a real initialization/format flow that writes a super block, inode bitmap, root directory, and free block metadata.
-- Add tests for inode bitmap, block serialization, directory block behavior, and disk initialization.
+可以这样区分：
+
+```text
+磁盘态：退出程序后仍然存在，例如 super block、inode、目录块、文件数据块、用户表。
+内存态：mount 后创建，退出或 unmount 后消失，例如当前用户、当前目录、打开文件表、缓存。
+```
+
+当前项目已经有一点内存态：`mount()` 会把超级块、root inode、root 目录读出来放进 `FileSystem` 对象。但它还不是完整的运行态设计。
+
+### 应该较早实现的运行态
+
+这些不是缓存优化，而是文件系统语义本身的一部分，建议在基础命令阶段就逐步加入：
+
+```python
+class FileSystem:
+    current_user
+    cwd_inode_id
+    cwd_path
+    open_file_table
+    next_fd
+```
+
+含义如下：
+
+- `current_user`：当前登录用户，后续权限检查依赖它。
+- `cwd_inode_id` / `cwd_path`：当前工作目录，每个 shell 会话都应该有自己的当前位置。
+- `open_file_table`：打开文件表，保存 fd 到打开文件对象的映射。
+- `next_fd`：下一个可分配的文件描述符，通常可以从 `3` 开始。
+
+建议的打开文件对象：
+
+```python
+class OpenFile:
+    fd: int
+    inode_id: int
+    path: str
+    mode: str
+    offset: int
+    readable: bool
+    writable: bool
+```
+
+### 文件读写建议走 fd 模型
+
+后续实现 `cat`、`write`、`append` 时，底层最好不要每次都直接“路径 -> 磁盘块”。更推荐先建立类似真实系统的文件描述符模型：
+
+```text
+open(path, mode) -> fd
+read(fd, size) -> bytes
+write(fd, data) -> int
+seek(fd, offset)
+close(fd)
+```
+
+典型流程：
+
+```text
+open("/home/a.txt", "r")
+  -> 路径解析
+  -> 权限检查
+  -> 读取 inode
+  -> 创建 OpenFile
+  -> 分配 fd
+  -> 放入 open_file_table
+  -> 返回 fd
+
+read(fd, size)
+  -> 从 open_file_table 找到 OpenFile
+  -> 根据 inode 和 offset 读取数据块
+  -> 更新 offset
+
+write(fd, data)
+  -> 从 open_file_table 找到 OpenFile
+  -> 检查 writable
+  -> 根据 offset 写入数据块
+  -> 更新 inode.size 和 modify_time
+  -> 更新 offset
+
+close(fd)
+  -> 必要时写回 inode / super block
+  -> 从 open_file_table 移除 fd
+```
+
+这样做的好处是，后续 shell 命令可以复用同一套核心 API：
+
+```text
+cat file       -> open + read + close
+write file x   -> open + write + close
+append file x  -> open + seek end + write + close
+```
+
+### 缓存优化可以后置
+
+需要区分“运行态”和“缓存”：
+
+```text
+应该早点做：
+current_user
+cwd
+open_file_table
+fd
+file offset
+
+可以晚点做：
+inode_cache
+dir_cache
+block_cache
+dirty_inodes
+dirty_dirs
+dirty_blocks
+sync
+LRU
+```
+
+缓存是优化层，不应该改变文件系统基本语义。建议先让下面这个闭环稳定：
+
+```text
+format
+mount
+mkdir
+touch
+write
+cat
+exit
+mount
+cat
+```
+
+确认重新挂载后目录、文件和内容都还在，再加入 inode/dir/block 缓存。
+
+### 后续缓存设计
+
+等基本命令稳定后，可以加入：
+
+```python
+inode_cache: dict[int, Inode]
+dir_cache: dict[int, DirBlock]
+block_cache: dict[int, bytes]
+dirty_inodes: set[int]
+dirty_dirs: set[int]
+dirty_blocks: set[int]
+```
+
+读取策略：
+
+```text
+缓存命中 -> 直接返回内存对象
+缓存未命中 -> 从磁盘读取 -> 放入缓存 -> 返回
+```
+
+修改策略：
+
+```text
+先修改内存对象
+标记 dirty
+sync 或 close 或 unmount 时写回磁盘
+```
+
+后续可以增加命令：
+
+```text
+sync      将 dirty 的内存对象写回磁盘
+unmount   先 sync，再释放内存态
+```
+
+推荐最终架构：
+
+```text
+disk.img
+  ^
+storage 层：read_block / write_block
+  ^
+cache 层：inode_cache / dir_cache / block_cache / dirty 标记
+  ^
+core 层：open/read/write/close/mkdir/ls/login/权限检查
+  ^
+cli 层：shell 命令
+```
+
+因此，项目实现顺序建议是：
+
+```text
+1. 先完成基础命令和磁盘持久化闭环。
+2. 文件读写阶段引入 open/read/write/close 和 fd 模型。
+3. 用户和权限接入 current_user。
+4. 语义稳定后再做 inode/dir/block 缓存和 dirty 写回。
+```
+
+## 注意事项
+
+- 当前项目使用 `pickle` 做本地模拟持久化，不要读取不可信磁盘镜像。
+- `src/user.py` 使用 MD5 哈希，适合课程项目演示，不适合真实生产安全。
+- 代码中已有用户未清理的历史注释和乱码，功能开发时优先保持行为正确。
+- 若修改磁盘布局、inode 字段或序列化格式，旧的 `disk.img` 可能不兼容，应重新 format。
+- 多用户和权限会影响所有命令，最好在文件内容读写稳定后再全面接入。

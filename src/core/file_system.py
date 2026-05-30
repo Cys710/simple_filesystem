@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Iterable
 
 from head import *
-from storage.disk import open_disk
+from storage.disk import open_disk, read_block, write_block
 from core.format_disk import format_disk, read_super_block, write_super_block
-from storage.inode_io import read_inode, write_inode
+from storage.inode_io import clear_inode_slot, read_inode, write_inode
 from core.mount import MountedFileSystem, mount
 from storage.object_io import read_object, write_object
 
@@ -118,8 +118,127 @@ class FileSystem:
     def pwd(self) -> str:
         return self.cwd_path
 
+    # read_file 从指定路径读取文件内容，返回 bytes
+    def read_file(self, path: str) -> bytes:
+        inode, _dir_block = self._resolve_path(path)
+        if inode.is_dir:
+            raise FileSystemError(f"is a directory: {path}")
+
+        content = bytearray()
+        with open_disk(self.path) as fp:
+            for data_block_id in inode.direct_blocks:
+                block = read_block(fp, DATA_BLOCK_START_ID + data_block_id)
+                content.extend(block)
+
+        return bytes(content[: inode.size])
+
+    # write_file 向指定路径写入数据，返回写入的字节数。
+    # 如果 append=True，则在文件末尾追加数据；否则覆盖原有内容。
+    def write_file(self, path: str, data: bytes | str, *, append: bool = False) -> int:
+        # 如果 data 是 str，则先编码为 bytes
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("data must be bytes or str")
+
+        inode, _dir_block = self._resolve_path(path)
+        if inode.is_dir:
+            raise FileSystemError(f"is a directory: {path}")
+
+        # 计算新内容的总字节数，并根据块大小计算需要的数据块数量
+        old_data = self.read_file(path) if append else b""
+        new_data = old_data + bytes(data)
+        needed_blocks = self._required_block_count(len(new_data))
+
+        # TODO: 目前只支持直接索引，后续可以扩展到间接索引
+        if needed_blocks > DIRECT_CNT:
+            max_size = DIRECT_CNT * BLOCK_SIZE
+            raise FileSystemError(f"file is too large: max {max_size} bytes")
+
+        with open_disk(self.path) as fp:
+            self.super_block = read_super_block(fp)
+            inode = read_inode(fp, inode.inode_id)
+
+            # 根据需要的数据块数量调整 inode 的直接索引块列表，分配或释放数据块
+            while len(inode.direct_blocks) < needed_blocks:
+                inode.direct_blocks.append(self.super_block.get_data_block_id(fp))
+
+            # 如果新内容需要的数据块比原来少，则释放多余的数据块
+            while len(inode.direct_blocks) > needed_blocks:
+                released_block_id = inode.direct_blocks.pop()
+                self.super_block.free_up_data_block(fp, released_block_id)
+            
+            # 将新内容写入 inode 的直接索引块对应的数据块中
+            for index, data_block_id in enumerate(inode.direct_blocks):
+                start = index * BLOCK_SIZE
+                end = start + BLOCK_SIZE
+                write_block(
+                    fp,
+                    DATA_BLOCK_START_ID + data_block_id,
+                    new_data[start:end],
+                )
+
+            inode.size = len(new_data)
+            inode.direct_blocks_size = len(inode.direct_blocks)
+            write_inode(fp, inode.inode_id, inode)
+            write_super_block(fp, self.super_block)
+
+        return len(data)
+
+    # remove 删除指定路径的文件
+    def remove(self, path: str) -> None:
+        parent_inode, parent_dir, name = self._resolve_parent(path)
+        if name in parent_dir.son_dirs:
+            raise FileSystemError(f"is a directory: {path}")
+        inode_id = parent_dir.son_files.get(name)
+        if inode_id is None:
+            raise FileSystemError(f"file not found: {path}")
+
+        with open_disk(self.path) as fp:
+            self.super_block = read_super_block(fp)
+            inode = read_inode(fp, inode_id)
+            self._free_inode_data_blocks(fp, inode)
+            self._free_inode_id(inode_id)
+            clear_inode_slot(fp, inode_id)
+            parent_dir.remove(name, FILE_TYPE)
+            self._write_dir(fp, parent_inode, parent_dir)
+            write_super_block(fp, self.super_block)
+
+        self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
+
+    # rmdir 删除指定路径的目录，目录必须为空
+    # TODO : 目前不支持递归删除非空目录，后续可以添加一个 recursive 参数来支持递归删除
+    def rmdir(self, path: str) -> None:
+        normalized = self._normalize_path(path)
+        if normalized == BASE_NAME:
+            raise FileSystemError("cannot remove root directory")
+
+        parent_inode, parent_dir, name = self._resolve_parent(path)
+        inode_id = parent_dir.son_dirs.get(name)
+        if inode_id is None:
+            if name in parent_dir.son_files:
+                raise FileSystemError(f"not a directory: {path}")
+            raise FileSystemError(f"directory not found: {path}")
+
+        inode, dir_block = self._resolve_dir(normalized)
+        if dir_block.son_files or dir_block.son_dirs:
+            raise FileSystemError(f"directory is not empty: {path}")
+
+        with open_disk(self.path) as fp:
+            self.super_block = read_super_block(fp)
+            inode = read_inode(fp, inode.inode_id)
+            self._free_inode_data_blocks(fp, inode)
+            self._free_inode_id(inode_id)
+            clear_inode_slot(fp, inode_id)
+            parent_dir.remove(name, DIR_TYPE)
+            self._write_dir(fp, parent_inode, parent_dir)
+            write_super_block(fp, self.super_block)
+
+        self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
+
+
     # 以下是一些内部辅助方法：
-    
+
     # _alloc_inode_id 从超级块的 inode 位图中分配一个新的 inode id
     def _alloc_inode_id(self) -> int:
         for inode_id in range(self.super_block.inode_cnt):
@@ -129,6 +248,30 @@ class FileSystem:
                 return inode_id
         raise FileSystemError("no free inode available")
 
+    # _free_inode_id 释放一个 inode id
+    # 将其在超级块的 inode 位图中标记为可用，并增加空闲 inode 计数
+    def _free_inode_id(self, inode_id: int) -> None:
+        if self.super_block.free_inode_bitmap._get_bit(inode_id) == 0:
+            raise FileSystemError(f"inode is already free: {inode_id}")
+        self.super_block.free_inode_bitmap._set_bit(inode_id, 0)
+        self.super_block.free_inode_cnt += 1
+    
+    # _free_inode_data_blocks 释放 inode 占用的数据块，并清空 inode 的直接索引列表和大小信息
+    # 间接索引的释放暂不支持，因为目前还没有实现间接索引
+    def _free_inode_data_blocks(self, fp, inode: Inode) -> None:
+        for data_block_id in inode.direct_blocks:
+            self.super_block.free_up_data_block(fp, data_block_id)
+        inode.direct_blocks.clear()
+        inode.direct_blocks_size = 0
+        inode.size = 0
+
+    # _required_block_count 计算存储指定字节数需要的数据块数量
+    def _required_block_count(self, byte_count: int) -> int:
+        if byte_count == 0:
+            return 0
+        # 向上取整计算需要的块数
+        return (byte_count + BLOCK_SIZE - 1) // BLOCK_SIZE
+    
     # _ensure_name_available 检查目录中是否已经存在同名的文件或目录
     def _ensure_name_available(self, dir_block: DirBlock, name: str) -> None:
         if name in dir_block.son_dirs or name in dir_block.son_files:

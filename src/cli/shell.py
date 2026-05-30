@@ -80,6 +80,16 @@ class Shell:
                 self._cd(args)
             elif cmd == "pwd":
                 self._pwd_command(args)
+            elif cmd == "cat":
+                self._cat(args)
+            elif cmd == "write":
+                self._write(args)
+            elif cmd == "append":
+                self._append(args)
+            elif cmd == "rm":
+                self._rm(args)
+            elif cmd == "rmdir":
+                self._rmdir(args)
             elif cmd in {"clear", "cls"}:
                 self._clear(args)
             else:
@@ -152,6 +162,32 @@ class Shell:
         self._expect_exact_args(args, 0, "pwd")
         self._println(self.fs.pwd())
 
+    def _cat(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 1, "cat file")
+        data = self.fs.read_file(args[0])
+        self._println(data.decode("utf-8", errors="replace"))
+
+    def _write(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_min_args(args, 2, "write file text")
+        self.fs.write_file(args[0], " ".join(args[1:]))
+
+    def _append(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_min_args(args, 2, "append file text")
+        self.fs.write_file(args[0], " ".join(args[1:]), append=True)
+
+    def _rm(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 1, "rm file")
+        self.fs.remove(args[0])
+
+    def _rmdir(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 1, "rmdir directory")
+        self.fs.rmdir(args[0])
+
     # _require_mount 检查文件系统是否已挂载，如果没有则抛出错误。
     def _require_mount(self) -> None:
         if self.fs is None:
@@ -163,11 +199,15 @@ class Shell:
 
     # _help 输出可用命令的帮助信息。
     def _help(self) -> None:
-        self._println("commands: format [disk], mount [disk], ls [path], mkdir name, touch name, cd path, pwd, clear, exit")
+        self._println("commands: format [disk], mount [disk], ls [path], mkdir name, touch name, cat file, write file text, append file text, rm file, rmdir directory, cd path, pwd, clear, exit")
 
     # _expect_exact_args 检查参数数量是否与预期完全匹配，否则抛出错误并显示用法。
     def _expect_exact_args(self, args: list[str], count: int, usage: str) -> None:
         if len(args) != count:
+            raise FileSystemError(f"usage: {usage}")
+
+    def _expect_min_args(self, args: list[str], count: int, usage: str) -> None:
+        if len(args) < count:
             raise FileSystemError(f"usage: {usage}")
 
     # _expect_max_args 检查参数数量是否不超过预期，否则抛出错误并显示用法。
