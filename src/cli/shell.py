@@ -84,8 +84,16 @@ class Shell:
                 self._login(args)
             elif cmd == "logout":
                 self._logout(args)
-            elif cmd == "who":
+            elif cmd in {"who", "whoami"}:
                 self._whoami(args)
+            elif cmd == "useradd":
+                self._useradd(args)
+            elif cmd == "passwd":
+                self._passwd(args)
+            elif cmd == "users":
+                self._users(args)
+            elif cmd == "su":
+                self._su(args)
             elif cmd == "cat":
                 self._cat(args)
             elif cmd == "open":
@@ -197,6 +205,29 @@ class Shell:
         self._expect_exact_args(args, 0, "whoami")
         self._println(self.fs.whoami())
 
+    def _useradd(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 2, "useradd username password")
+        user_id = self.fs.useradd(args[0], args[1])
+        self._println(f"created user {args[0]} ({user_id})")
+
+    def _passwd(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 2, "passwd username new_password")
+        self.fs.passwd(args[0], args[1])
+        self._println(f"password updated for {args[0]}")
+
+    def _users(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 0, "users")
+        self._println("  ".join(self.fs.users()))
+
+    def _su(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 2, "su username password")
+        self.fs.su(args[0], args[1])
+        self._println(f"switched to {self.fs.whoami()}")
+
     # _cat 输出指定文件的内容，参数为文件路径。
     def _cat(self, args: list[str]) -> None:
         self._require_mount()
@@ -297,7 +328,12 @@ class Shell:
         " touch file_name\n" \
         " login username password\n" \
         " logout\n" \
+        " whoami\n" \
         " who\n" \
+        " useradd username password\n" \
+        " passwd username new_password\n" \
+        " users\n" \
+        " su username password\n" \
         " cat file\n" \
         " open file [mode]\n" \
         " read fd [size]\n" \

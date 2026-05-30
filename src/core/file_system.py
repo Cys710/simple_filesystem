@@ -33,7 +33,6 @@ class FileSystem:
     def __init__(self, mounted: MountedFileSystem):
         self.path = mounted.path
         self.super_block = mounted.super_block
-        # self._ensure_user_table()
         self.current_user: User | None = None
         self.cwd_inode = mounted.root_inode
         self.cwd_dir = mounted.root_dir
@@ -130,7 +129,6 @@ class FileSystem:
 
     # login 校验用户名和密码，并记录当前用户会话
     def login(self, username: str, password: str) -> None:
-        # self._ensure_user_table()
         user = self.super_block.users.get(username)
         if user is None or not user.login(username, password):
             raise FileSystemError("invalid username or password")
@@ -143,6 +141,61 @@ class FileSystem:
     # whoami 返回当前登录用户名；未登录时返回 guest
     def whoami(self) -> str:
         return self.current_user.name if self.current_user is not None else "guest"
+
+    # useradd 由 root 创建新用户，并为用户创建 /home/<username>
+    def useradd(self, username: str, password: str) -> int:
+        self._require_root_user()
+        self._validate_username(username)
+        if username in self.super_block.users:
+            raise FileSystemError(f"user already exists: {username}")
+
+        user_id = self._next_user_id()
+        home_path = f"/home/{username}"
+        old_user = self.current_user
+        self.current_user = self.super_block.users["root"]
+        try:
+            self._ensure_dir_exists("/home")
+            self.mkdir(home_path)
+            user = User(username, password, user_id, home_path)
+            self.super_block.users[username] = user
+            self._write_super_block_to_disk()
+        finally:
+            self.current_user = old_user
+        return user_id
+
+    # passwd 修改用户密码；root 可改任意用户，普通用户只能改自己
+    def passwd(self, username: str, new_password: str) -> None:
+        self._require_login()
+        if username not in self.super_block.users:
+            raise FileSystemError(f"user not found: {username}")
+        if not self._is_root_user() and self.current_user.name != username:
+            raise FileSystemError("permission denied")
+
+        self.super_block.users[username].set_password(new_password)
+        if self.current_user and self.current_user.name == username:
+            self.current_user = self.super_block.users[username]
+        self._write_super_block_to_disk()
+
+    # users 返回所有用户名，按 user_id 排序
+    def users(self) -> list[str]:
+        self._require_root_user()
+        return [
+            user.name
+            for user in sorted(
+                self.super_block.users.values(),
+                key=lambda item: item.user_id,
+            )
+        ]
+
+    # su 校验目标用户密码，并切换当前会话；若有 home 目录则切换过去
+    def su(self, username: str, password: str) -> None:
+        self.login(username, password)
+        home_path = self.current_user.home_path
+        if home_path:
+            try:
+                self.cd(home_path)
+            except FileSystemError:
+                pass
 
     # open 打开文件，返回文件描述符
     def open(self, path: str, mode: str = "r") -> int:
@@ -322,15 +375,50 @@ class FileSystem:
 
     # 以下是一些内部辅助方法：
 
-    # # 确保超级块里存在用户表。旧磁盘镜像可能没有这个字段。
-    # def _ensure_user_table(self) -> None:
-    #     if not hasattr(self.super_block, "users") or self.super_block.users is None:
-    #         self.super_block.users = {}
-    #     if "root" not in self.super_block.users:
-    #         self.super_block.users["root"] = create_root_user()
-
     def _current_user_id(self) -> int:
         return self.current_user.user_id if self.current_user is not None else ROOT_ID
+
+    # _write_super_block_to_disk 将当前内存中的超级块写回磁盘
+    def _write_super_block_to_disk(self) -> None:
+        with open_disk(self.path) as fp:
+            write_super_block(fp, self.super_block)
+
+    # 检查是否有用户登录
+    def _require_login(self) -> None:
+        if self.current_user is None:
+            raise FileSystemError("login required")
+        
+    # 检查当前用户是否是 root 用户
+    def _is_root_user(self) -> bool:
+        return self.current_user is not None and self.current_user.user_id == ROOT_ID
+
+    # 检查当前用户是否是 root 用户，否则抛出权限错误
+    def _require_root_user(self) -> None:
+        self._require_login()
+        if not self._is_root_user():
+            raise FileSystemError("permission denied")
+
+    # 验证用户名是否合法
+    def _validate_username(self, username: str) -> None:
+        if not username:
+            raise FileSystemError("username cannot be empty")
+        if username in {".", ".."} or "/" in username:
+            raise FileSystemError(f"invalid username: {username}")
+
+    # 用户ID分配
+    def _next_user_id(self) -> int:
+        used_ids = {user.user_id for user in self.super_block.users.values()}
+        user_id = 1
+        while user_id in used_ids:
+            user_id += 1
+        return user_id
+
+    # 确保目录存在，如果不存在则创建
+    def _ensure_dir_exists(self, path: str) -> None:
+        try:
+            self._resolve_dir(path)
+        except FileSystemError:
+            self.mkdir(path)
 
     # 根据文件描述符获取对应的 OpenFile 对象
     def _get_open_file(self, fd: int) -> OpenFile:
