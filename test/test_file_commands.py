@@ -9,7 +9,9 @@ SRC = os.path.join(PROJECT_ROOT, "src")
 
 sys.path.insert(0, SRC)
 
-from core.file_system import FileSystem, FileSystemError
+from head import BLOCK_SIZE, DIRECT_CNT
+from storage.object_io import pack_object
+from core.file_system import FileSystem, FileSystemError, MAX_INDIRECT_BLOCK_IDS
 
 
 class TestFileCommands(unittest.TestCase):
@@ -32,6 +34,29 @@ class TestFileCommands(unittest.TestCase):
             self.assertEqual(remounted.read_file("/note.txt"), b"hello world")
         finally:
             temp_dir.cleanup()
+
+    def test_write_reads_through_single_indirect_blocks(self):
+        temp_dir, disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/big.bin")
+            payload = b"x" * (DIRECT_CNT * BLOCK_SIZE + 123)
+
+            fs.write_file("/big.bin", payload)
+
+            self.assertEqual(fs.read_file("/big.bin"), payload)
+
+            inode, _dir_block = fs._resolve_path("/big.bin")
+            self.assertEqual(len(inode.direct_blocks), DIRECT_CNT)
+            self.assertIsNotNone(inode.indirect_block)
+
+            remounted = FileSystem.mount(disk_path)
+            self.assertEqual(remounted.read_file("/big.bin"), payload)
+        finally:
+            temp_dir.cleanup()
+
+    def test_indirect_capacity_is_conservative_for_object_io(self):
+        self.assertGreaterEqual(MAX_INDIRECT_BLOCK_IDS, 1)
+        pack_object(list(range(MAX_INDIRECT_BLOCK_IDS)))
 
     def test_rm_removes_file_and_releases_inode(self):
         temp_dir, _disk_path, fs = self.make_fs()
@@ -71,6 +96,25 @@ class TestFileCommands(unittest.TestCase):
 
             with self.assertRaises(FileSystemError):
                 fs.rmdir("/parent")
+        finally:
+            temp_dir.cleanup()
+
+    def test_rmdir_recursive_removes_directory_tree(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            before = fs.super_block.free_inode_cnt
+            fs.mkdir("/parent")
+            fs.mkdir("/parent/child")
+            fs.touch("/parent/child/a.txt")
+            fs.write_file("/parent/child/a.txt", "hello")
+
+            with self.assertRaises(FileSystemError):
+                fs.rmdir("/parent")
+
+            fs.rmdir("/parent", recursive=True)
+
+            self.assertEqual(fs.super_block.free_inode_cnt, before)
+            self.assertEqual(fs.ls("/"), [])
         finally:
             temp_dir.cleanup()
 

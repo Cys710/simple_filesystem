@@ -13,10 +13,13 @@ from storage.disk import open_disk, read_block, write_block
 from core.format_disk import format_disk, read_super_block, write_super_block
 from storage.inode_io import clear_inode_slot, read_inode, write_inode
 from core.mount import MountedFileSystem, mount
-from storage.object_io import read_object, write_object
+from storage.object_io import ObjectIOError, pack_object, read_object, write_object
 
 from dataStruct.data import DirBlock, SuperBlock  
 from dataStruct import Inode  
+
+# 间接索引块 安全存储的最大数据块数量
+MAX_INDIRECT_BLOCK_IDS = BLOCK_SIZE // 4 - 2
 
 # 文件错误定义
 class FileSystemError(Exception):
@@ -126,7 +129,7 @@ class FileSystem:
 
         content = bytearray()
         with open_disk(self.path) as fp:
-            for data_block_id in inode.direct_blocks:
+            for data_block_id in self._file_data_block_ids(fp, inode):
                 block = read_block(fp, DATA_BLOCK_START_ID + data_block_id)
                 content.extend(block)
 
@@ -150,26 +153,27 @@ class FileSystem:
         new_data = old_data + bytes(data)
         needed_blocks = self._required_block_count(len(new_data))
 
-        # TODO: 目前只支持直接索引，后续可以扩展到间接索引
-        if needed_blocks > DIRECT_CNT:
-            max_size = DIRECT_CNT * BLOCK_SIZE
+        if needed_blocks > self._max_file_block_count():
+            max_size = self._max_file_block_count() * BLOCK_SIZE
             raise FileSystemError(f"file is too large: max {max_size} bytes")
 
         with open_disk(self.path) as fp:
             self.super_block = read_super_block(fp)
             inode = read_inode(fp, inode.inode_id)
+            data_block_ids = self._file_data_block_ids(fp, inode)
 
             # 根据需要的数据块数量调整 inode 的直接索引块列表，分配或释放数据块
-            while len(inode.direct_blocks) < needed_blocks:
-                inode.direct_blocks.append(self.super_block.get_data_block_id(fp))
+            while len(data_block_ids) < needed_blocks:
+                data_block_ids.append(self.super_block.get_data_block_id(fp))
 
             # 如果新内容需要的数据块比原来少，则释放多余的数据块
-            while len(inode.direct_blocks) > needed_blocks:
-                released_block_id = inode.direct_blocks.pop()
+            while len(data_block_ids) > needed_blocks:
+                released_block_id = data_block_ids.pop()
                 self.super_block.free_up_data_block(fp, released_block_id)
+            self._set_file_data_block_ids(fp, inode, data_block_ids)
             
             # 将新内容写入 inode 的直接索引块对应的数据块中
-            for index, data_block_id in enumerate(inode.direct_blocks):
+            for index, data_block_id in enumerate(data_block_ids):
                 start = index * BLOCK_SIZE
                 end = start + BLOCK_SIZE
                 write_block(
@@ -207,8 +211,7 @@ class FileSystem:
         self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
 
     # rmdir 删除指定路径的目录，目录必须为空
-    # TODO : 目前不支持递归删除非空目录，后续可以添加一个 recursive 参数来支持递归删除
-    def rmdir(self, path: str) -> None:
+    def rmdir(self, path: str, *, recursive: bool = False) -> None:
         normalized = self._normalize_path(path)
         if normalized == BASE_NAME:
             raise FileSystemError("cannot remove root directory")
@@ -221,12 +224,14 @@ class FileSystem:
             raise FileSystemError(f"directory not found: {path}")
 
         inode, dir_block = self._resolve_dir(normalized)
-        if dir_block.son_files or dir_block.son_dirs:
+        if not recursive and (dir_block.son_files or dir_block.son_dirs):
             raise FileSystemError(f"directory is not empty: {path}")
 
         with open_disk(self.path) as fp:
             self.super_block = read_super_block(fp)
             inode = read_inode(fp, inode.inode_id)
+            if recursive:
+                self._remove_dir_children(fp, dir_block)
             self._free_inode_data_blocks(fp, inode)
             self._free_inode_id(inode_id)
             clear_inode_slot(fp, inode_id)
@@ -259,10 +264,13 @@ class FileSystem:
     # _free_inode_data_blocks 释放 inode 占用的数据块，并清空 inode 的直接索引列表和大小信息
     # 间接索引的释放暂不支持，因为目前还没有实现间接索引
     def _free_inode_data_blocks(self, fp, inode: Inode) -> None:
-        for data_block_id in inode.direct_blocks:
+        for data_block_id in self._file_data_block_ids(fp, inode):
             self.super_block.free_up_data_block(fp, data_block_id)
+        if inode.indirect_block is not None:
+            self.super_block.free_up_data_block(fp, inode.indirect_block)
         inode.direct_blocks.clear()
         inode.direct_blocks_size = 0
+        inode.indirect_block = None
         inode.size = 0
 
     # _required_block_count 计算存储指定字节数需要的数据块数量
@@ -272,6 +280,67 @@ class FileSystem:
         # 向上取整计算需要的块数
         return (byte_count + BLOCK_SIZE - 1) // BLOCK_SIZE
     
+    # 一个文件最多可以使用的数据块数量，受直接索引和间接索引的限制
+    def _max_file_block_count(self) -> int:
+        return DIRECT_CNT + MAX_INDIRECT_BLOCK_IDS
+
+    # 直接索引 + 一级间接索引 -> 数据块 id 列表
+    def _file_data_block_ids(self, fp, inode: Inode) -> list[int]:
+        data_block_ids = list(inode.direct_blocks)
+        if inode.indirect_block is None:
+            return data_block_ids
+
+        indirect_ids = read_object(fp, DATA_BLOCK_START_ID + inode.indirect_block)
+        if not isinstance(indirect_ids, list):
+            raise FileSystemError(f"inode {inode.inode_id} has an invalid indirect block")
+        return data_block_ids + indirect_ids
+
+    # 根据给定的数据块 id 列表更新 inode 的直接索引和一级间接索引
+    def _set_file_data_block_ids(self, fp, inode: Inode, data_block_ids: list[int]) -> None:
+        direct_ids = data_block_ids[:DIRECT_CNT]
+        indirect_ids = data_block_ids[DIRECT_CNT:]
+
+        inode.direct_blocks = direct_ids
+        inode.direct_blocks_size = len(direct_ids)
+
+        if indirect_ids:
+            if len(indirect_ids) > MAX_INDIRECT_BLOCK_IDS:
+                raise FileSystemError("too many indirect data blocks")
+            try:
+                pack_object(indirect_ids)
+            except ObjectIOError as exc:
+                raise FileSystemError("indirect block is too large") from exc
+            if inode.indirect_block is None:
+                inode.indirect_block = self.super_block.get_data_block_id(fp)
+            write_object(fp, DATA_BLOCK_START_ID + inode.indirect_block, indirect_ids)
+        elif inode.indirect_block is not None:
+            old_indirect_block = inode.indirect_block
+            inode.indirect_block = None
+            self.super_block.free_up_data_block(fp, old_indirect_block)
+
+    # 递归删除目录下的所有子目录和文件，释放它们占用的 inode 和数据块
+    def _remove_dir_children(self, fp, dir_block: DirBlock) -> None:
+        
+        for _name, inode_id in list(dir_block.son_files.items()):
+            inode = read_inode(fp, inode_id)
+            self._free_inode_data_blocks(fp, inode)
+            self._free_inode_id(inode_id)
+            clear_inode_slot(fp, inode_id)
+
+        for _name, inode_id in list(dir_block.son_dirs.items()):
+            inode = read_inode(fp, inode_id)
+            child_dir = read_object(fp, DATA_BLOCK_START_ID + inode.direct_blocks[0])
+            if not isinstance(child_dir, DirBlock):
+                raise FileSystemError(f"inode {inode_id} does not point to a DirBlock")
+            self._remove_dir_children(fp, child_dir)
+            self._free_inode_data_blocks(fp, inode)
+            self._free_inode_id(inode_id)
+            clear_inode_slot(fp, inode_id)
+
+        dir_block.son_files.clear()
+        dir_block.son_dirs.clear()
+        dir_block.counts = 0
+
     # _ensure_name_available 检查目录中是否已经存在同名的文件或目录
     def _ensure_name_available(self, dir_block: DirBlock, name: str) -> None:
         if name in dir_block.son_dirs or name in dir_block.son_files:

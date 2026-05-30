@@ -185,8 +185,12 @@ class Shell:
 
     def _rmdir(self, args: list[str]) -> None:
         self._require_mount()
-        self._expect_exact_args(args, 1, "rmdir directory")
-        self.fs.rmdir(args[0])
+        recursive = False
+        if args and args[0] in {"-r", "--recursive"}:
+            recursive = True
+            args = args[1:]
+        self._expect_exact_args(args, 1, "rmdir [-r|--recursive] directory")
+        self.fs.rmdir(args[0], recursive=recursive)
 
     # _require_mount 检查文件系统是否已挂载，如果没有则抛出错误。
     def _require_mount(self) -> None:
@@ -199,7 +203,7 @@ class Shell:
 
     # _help 输出可用命令的帮助信息。
     def _help(self) -> None:
-        self._println("commands: format [disk], mount [disk], ls [path], mkdir name, touch name, cat file, write file text, append file text, rm file, rmdir directory, cd path, pwd, clear, exit")
+        self._println("commands: format [disk], mount [disk], ls [path], mkdir name, touch name, cat file, write file text, append file text, rm file, rmdir [-r] directory, cd path, pwd, clear, exit")
 
     # _expect_exact_args 检查参数数量是否与预期完全匹配，否则抛出错误并显示用法。
     def _expect_exact_args(self, args: list[str], count: int, usage: str) -> None:
