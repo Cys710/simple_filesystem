@@ -145,9 +145,16 @@ class DirBlock(Block):
             self.son_dirs.pop(name)
             self.counts -= 1
 
+    # def file_name_and_types(self):
+    #     return [(key, DIR_TYPE) for key in self.son_dirs.keys()] \
+    #            + [(key, FILE_TYPE) for key in self.son_files.keys()]
+
     def file_name_and_types(self):
-        return [(key, DIR_TYPE) for key in self.son_dirs.keys()] \
-               + [(key, FILE_TYPE) for key in self.son_files.keys()]
+
+        dirs = [(BLUE + name + RESET, DIR_TYPE) for name in self.son_dirs]
+        files = [(name, FILE_TYPE) for name in self.son_files]
+
+        return dirs + files
 
     def is_exist_son_files(self, name):
         """

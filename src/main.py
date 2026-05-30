@@ -8,6 +8,7 @@ from cli.shell import main
 
 if __name__ == "__main__":
     main()
+    
     # # 初始化磁盘镜像并挂载
     # fs = init()
     # print(f"mounted: {fs.path}")

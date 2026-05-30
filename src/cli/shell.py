@@ -1,7 +1,6 @@
 """
     命令行交互层，解析用户输入的命令并调用 FileSystem 的方法实现功能。
     支持格式化磁盘、挂载磁盘、列出目录、创建目录和文件、切换目录等操作。
-
 """
 
 from __future__ import annotations
@@ -11,8 +10,9 @@ import shlex
 from pathlib import Path
 from typing import Callable, TextIO
 
-from head import DISK_NAME
+from head import DISK_NAME, GREEN, RESET
 from core.file_system import FileSystem, FileSystemError
+from utils import logo
 
 # Shell 解析用户输入的命令并调用 FileSystem 的方法实现功能。
 class Shell:
@@ -31,12 +31,14 @@ class Shell:
 
     # run 启动交互式 shell，提示用户输入命令并执行，直到用户退出。
     def run(self) -> None:
+        logo()
         self._println(f"disk: {self.disk_path}")
         self._println("type 'format' to create a fresh file system or 'mount' to load one")
 
         while True:
             try:
-                line = self.input_func(f"pfs:{self._pwd()}$ ")
+                # line = self.input_func(f"pfs:{self._pwd()}$ ")
+                line = self.input_func(f"{GREEN}pfs:{self._pwd()}$ {RESET}")
             except (EOFError, KeyboardInterrupt):
                 self._println()
                 return
@@ -116,8 +118,9 @@ class Shell:
 
         names = []
         for name, type_id in entries:
-            suffix = "/" if type_id == 1 else ""
-            names.append(f"{name}{suffix}")
+            # suffix = "/" if type_id == 1 else ""
+            # names.append(f"{name}{suffix}")
+            names.append(name)
         self._println("  ".join(names))
 
     # _mkdir 在当前目录下创建一个新目录，参数为目录名。

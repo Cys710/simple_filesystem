@@ -75,3 +75,7 @@ FILE_COLOR_F = "37"   # 文件：白色
 FILE_COLOR_B = "40"
 DIR_COLOR_F = "32"    # 目录：绿色
 DIR_COLOR_B = "40"
+
+BLUE = "\033[1;34;40m"      # 亮蓝      (目录)
+GREEN = "\033[1;32m"        # 亮绿色    (命令行头)
+RESET = "\033[0m"           # 恢复默认  (白色)

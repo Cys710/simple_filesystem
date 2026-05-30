@@ -2,6 +2,14 @@
     系统工具函数,方便实现一些功能
 """
 
+
+from textwrap import dedent
+from head import BLUE, LOGO, RESET
+
+def logo():
+    logo_str = LOGO
+    print(BLUE + logo_str + RESET)
+
 # import time
 # import pickle
 # from math import ceil
