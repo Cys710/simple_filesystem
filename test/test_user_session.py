@@ -87,7 +87,7 @@ class TestUserSession(unittest.TestCase):
             self.assertTrue(home_inode.is_dir)
             self.assertEqual(home_dir.name, "alice")
             self.assertEqual(home_inode.user_id, user_id)
-            self.assertEqual(fs.stat("/home/alice")["mode"], "700")
+            self.assertEqual(fs.stat("/home/alice")["mode"], "70")
         finally:
             temp_dir.cleanup()
 
@@ -182,8 +182,8 @@ class TestUserSession(unittest.TestCase):
             fs.useradd("bob", "bob-pass")
             fs.su("alice", "alice-pass")
             fs.write_file("shared.txt", "hello")
-            fs.chmod("/home/alice", "755")
-            fs.chmod("/home/alice/shared.txt", "644")
+            fs.chmod("/home/alice", "75")
+            fs.chmod("/home/alice/shared.txt", "64")
 
             fs.su("bob", "bob-pass")
             self.assertEqual(fs.read_file("/home/alice/shared.txt"), b"hello")
@@ -191,8 +191,8 @@ class TestUserSession(unittest.TestCase):
                 fs.write_file("/home/alice/shared.txt", "blocked")
 
             fs.su("alice", "alice-pass")
-            fs.chmod("/home/alice/shared.txt", "600")
-            self.assertEqual(fs.stat("/home/alice/shared.txt")["mode"], "600")
+            fs.chmod("/home/alice/shared.txt", "60")
+            self.assertEqual(fs.stat("/home/alice/shared.txt")["mode"], "60")
         finally:
             temp_dir.cleanup()
 
@@ -204,11 +204,11 @@ class TestUserSession(unittest.TestCase):
             fs.useradd("bob", "bob-pass")
             fs.su("alice", "alice-pass")
             fs.write_file("note.txt", "hello")
-            fs.chmod("/home/alice", "755")
+            fs.chmod("/home/alice", "75")
 
             fs.su("bob", "bob-pass")
             with self.assertRaises(FileSystemError):
-                fs.chmod("/home/alice/note.txt", "777")
+                fs.chmod("/home/alice/note.txt", "77")
         finally:
             temp_dir.cleanup()
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shlex
+from getpass import getpass
 from pathlib import Path
 from typing import Callable, TextIO
 
@@ -22,10 +23,12 @@ class Shell:
         disk_path: str | Path = DISK_NAME,
         *,
         input_func: Callable[[str], str] = input,
+        password_func: Callable[[str], str] = getpass,
         output: TextIO | None = None,
     ):
         self.disk_path = Path(disk_path)
         self.input_func = input_func
+        self.password_func = password_func
         self.output = output
         self.fs: FileSystem | None = None
 
@@ -191,8 +194,9 @@ class Shell:
     # _login 登录用户，参数为用户名和密码。
     def _login(self, args: list[str]) -> None:
         self._require_mount()
-        self._expect_exact_args(args, 2, "login username password")
-        self.fs.login(args[0], args[1])
+        self._expect_exact_args(args, 1, "login username")
+        password = self._read_password("Password: ")
+        self.fs.login(args[0], password)
         self._println(f"logged in as {self.fs.whoami()}")
 
     # _logout 注销当前用户，参数必须为空。
@@ -211,15 +215,20 @@ class Shell:
 
     def _useradd(self, args: list[str]) -> None:
         self._require_mount()
-        self._expect_exact_args(args, 2, "useradd username password")
-        user_id = self.fs.useradd(args[0], args[1])
+        self._expect_exact_args(args, 1, "useradd username")
+        password = self._read_new_password()
+        user_id = self.fs.useradd(args[0], password)
         self._println(f"created user {args[0]} ({user_id})")
 
     def _passwd(self, args: list[str]) -> None:
         self._require_mount()
-        self._expect_exact_args(args, 2, "passwd username new_password")
-        self.fs.passwd(args[0], args[1])
-        self._println(f"password updated for {args[0]}")
+        self._expect_max_args(args, 1, "passwd [username]")
+        username = args[0] if args else self.fs.whoami()
+        if username == "guest":
+            raise FileSystemError("login required")
+        password = self._read_new_password()
+        self.fs.passwd(username, password)
+        self._println(f"password updated for {username}")
 
     def _users(self, args: list[str]) -> None:
         self._require_mount()
@@ -228,8 +237,9 @@ class Shell:
 
     def _su(self, args: list[str]) -> None:
         self._require_mount()
-        self._expect_exact_args(args, 2, "su username password")
-        self.fs.su(args[0], args[1])
+        self._expect_exact_args(args, 1, "su username")
+        password = self._read_password("Password: ")
+        self.fs.su(args[0], password)
         self._println(f"switched to {self.fs.whoami()}")
 
     def _chmod(self, args: list[str]) -> None:
@@ -336,6 +346,18 @@ class Shell:
             return False
         return True
 
+    def _read_password(self, prompt: str) -> str:
+        return self.password_func(prompt)
+
+    def _read_new_password(self) -> str:
+        password = self._read_password("New password: ")
+        confirm = self._read_password("Retype new password: ")
+        if password != confirm:
+            raise FileSystemError("passwords do not match")
+        if not password:
+            raise FileSystemError("password cannot be empty")
+        return password
+
     # _help 输出可用命令的帮助信息。
     def _help(self) -> None:
         self._println("commands: \n" \
@@ -344,14 +366,14 @@ class Shell:
         " ls [path]\n" \
         " mkdir dir_name\n" \
         " touch file_name\n" \
-        " login username password\n" \
+        " login username\n" \
         " logout\n" \
         " whoami\n" \
         " who\n" \
-        " useradd username password\n" \
-        " passwd username new_password\n" \
+        " useradd username\n" \
+        " passwd [username]\n" \
         " users\n" \
-        " su username password\n" \
+        " su username\n" \
         " chmod mode path\n" \
         " stat path\n" \
         " cat file\n" \

@@ -451,7 +451,7 @@ class FileSystem:
         mode = self._inode_mode(inode)
         owner_id = self._inode_owner_id(inode)
         user_id = self._current_user_id()
-        shift = 6 if user_id == owner_id else 0
+        shift = 3 if user_id == owner_id else 0
 
         if not ((mode >> shift) & bit_map[permission]):
             raise FileSystemError("permission denied")
@@ -459,20 +459,20 @@ class FileSystem:
     # 解析mode
     def _parse_mode(self, mode: int | str) -> int:
         if isinstance(mode, str):
-            if len(mode) != 3 or any(ch not in "01234567" for ch in mode):
+            if len(mode) != 2 or any(ch not in "01234567" for ch in mode):
                 raise FileSystemError(f"invalid mode: {mode}")
             mode_value = int(mode, 8)
         elif isinstance(mode, int):
             mode_value = mode
         else:
             raise TypeError("mode must be int or str")
-        if mode_value < 0 or mode_value > 0o777:
+        if mode_value < 0 or mode_value > 0o77:
             raise FileSystemError(f"invalid mode: {mode}")
         return mode_value
 
-    # mode 转换为字符串形式的权限表示，例如 0o755 -> "755"
+    # mode 转换为字符串形式的权限表示，例如 0o75 -> "75"
     def _mode_to_string(self, mode: int) -> str:
-        return format(mode, "03o")
+        return format(mode, "02o")
 
     # _write_super_block_to_disk 将当前内存中的超级块写回磁盘
     def _write_super_block_to_disk(self) -> None:

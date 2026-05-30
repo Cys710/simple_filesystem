@@ -27,10 +27,10 @@ class InodeBitmap(Block):
             self.bitmap[byte_index] &= ~(1 << bit_index)
 
 
-# 权限位沿用 chmod 的三位八进制写法；当前课设只使用 owner 和 others 两段。
-DEFAULT_FILE_MODE = 0o644   # 默认文件权限：owner 可读写，others 可读
-DEFAULT_DIR_MODE = 0o755    # 默认目录权限：owner 可读写执行，others 可读执行
-PRIVATE_DIR_MODE = 0o700    # 私有目录权限：只有 owner 可读写执行
+# 权限位使用两位八进制写法：第一位 owner，第二位 others。
+DEFAULT_FILE_MODE = 0o64    # 默认文件权限：owner 可读写，others 可读
+DEFAULT_DIR_MODE = 0o75     # 默认目录权限：owner 可读写执行，others 可读执行
+PRIVATE_DIR_MODE = 0o70     # 私有目录权限：只有 owner 可读写执行
 
 # 索引节点
 class Inode(Block):
