@@ -203,7 +203,21 @@ class Shell:
 
     # _help 输出可用命令的帮助信息。
     def _help(self) -> None:
-        self._println("commands: format [disk], mount [disk], ls [path], mkdir name, touch name, cat file, write file text, append file text, rm file, rmdir [-r] directory, cd path, pwd, clear, exit")
+        self._println("commands: \n" \
+        " format [disk]\n" \
+        " mount [disk]\n" \
+        " ls [path]\n" \
+        " mkdir dir_name\n" \
+        " touch file_name\n" \
+        " cat file\n" \
+        " write file text\n" \
+        " append file text\n" \
+        " rm file\n" \
+        " rmdir [-r] directory\n" \
+        " cd path\n" \
+        " pwd\n" \
+        " clear\n" \
+        " exit")
 
     # _expect_exact_args 检查参数数量是否与预期完全匹配，否则抛出错误并显示用法。
     def _expect_exact_args(self, args: list[str], count: int, usage: str) -> None:
