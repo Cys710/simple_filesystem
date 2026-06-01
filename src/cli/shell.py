@@ -39,19 +39,17 @@ class Shell:
         self.output = output
         self.fs: FileSystem | None = None
         self.completer = CommandCompleter(lambda: self.fs)
-        self._readline_matches: list[str] = []
+        self._prompt_reader = None
 
     # run 启动交互式 shell，提示用户输入命令并执行，直到用户退出。
     def run(self) -> None:
-        self._configure_readline()
         logo()
         self._println(f"disk: {self.disk_path}")
         self._println("type 'format' to create a fresh file system or 'mount' to load one")
 
         while True:
             try:
-                # line = self.input_func(f"pfs:{self._pwd()}$ ")
-                line = self.input_func(f"{GREEN}pfs:{self._pwd()}$ {RESET}")
+                line = self._read_command(f"{GREEN}pfs:{self._pwd()}$ {RESET}")
             except (EOFError, KeyboardInterrupt):
                 self._println()
                 return
@@ -424,29 +422,19 @@ class Shell:
             raise FileSystemError("password cannot be empty")
         return password
 
-    def _configure_readline(self) -> None:
+    def _read_command(self, prompt: str) -> str:
         if self.input_func is not input:
-            return
-        try:
-            import readline
-        except ImportError:
-            return
-
-        readline.set_completer(self._readline_complete)
-        readline.set_completer_delims(" \t\n")
-        readline.parse_and_bind("tab: complete")
-
-    def _readline_complete(self, _text: str, state: int) -> str | None:
-        try:
-            import readline
-        except ImportError:
-            return None
-
-        if state == 0:
-            self._readline_matches = self.completer.candidates(readline.get_line_buffer())
-        if state >= len(self._readline_matches):
-            return None
-        return self._readline_matches[state]
+            return self.input_func(prompt)
+        if self._prompt_reader is None:
+            try:
+                from cli.prompt import PromptReader
+            except ImportError as exc:
+                raise RuntimeError(
+                    "prompt-toolkit is required for the interactive shell; "
+                    "install it with 'python -m pip install -r requirements.txt'"
+                ) from exc
+            self._prompt_reader = PromptReader(self.completer)
+        return self._prompt_reader.read(prompt)
 
     # _help 输出可用命令的帮助信息。
     def _help(self) -> None:

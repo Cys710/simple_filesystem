@@ -46,12 +46,15 @@ class DiskMonitor:
         self.running = True
         self.index_path: str | None = None
         self.needs_full_redraw = True
+        self.screen_size: tuple[int, int] | None = None
 
     def run(self) -> None:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise DiskMonitorError("monitor requires an interactive terminal")
         try:
             curses.wrapper(self._run_screen)
+        except KeyboardInterrupt:
+            self.running = False
         except curses.error as exc:
             raise DiskMonitorError(f"monitor terminal error: {exc}") from exc
 
@@ -74,10 +77,14 @@ class DiskMonitor:
                 # Some terminal wrappers briefly expose a non-blocking read.
                 time.sleep(0.01)
                 continue
+            if key == curses.KEY_RESIZE:
+                self._invalidate_screen(stdscr)
             self._handle_key(key)
 
     def _handle_key(self, key) -> None:
-        if key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
+        if key == curses.KEY_RESIZE:
+            self.needs_full_redraw = True
+        elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
             self.command = self.command[:-1]
         elif key in ("\n", "\r"):
             command = self.command.strip()
@@ -171,39 +178,53 @@ class DiskMonitor:
         self.col_offset = 0
         self.needs_full_redraw = True
 
+    def _invalidate_screen(self, stdscr) -> None:
+        try:
+            stdscr.clearok(True)
+        except curses.error:
+            pass
+        self.screen_size = None
+        self.needs_full_redraw = True
+
     def _draw(self, stdscr) -> None:
+        height, width = stdscr.getmaxyx()
+        screen_size = (height, width)
+        if screen_size != self.screen_size:
+            self.screen_size = screen_size
+            self.needs_full_redraw = True
+
         if self.needs_full_redraw:
             stdscr.clear()
             self.needs_full_redraw = False
         else:
             stdscr.erase()
-        height, width = stdscr.getmaxyx()
         if height < 16 or width < 68:
             self._draw_small_terminal(stdscr, height, width)
             return
+        canvas_width = width - 1
 
         inspector = FileSystemInspector(self.fs)
         try:
-            lines = self._view_lines(inspector, width)
+            lines = self._view_lines(inspector, canvas_width)
         except Exception as exc:
             lines = [f"Unable to render monitor data: {exc}"]
 
-        self._draw_header(stdscr, width)
+        self._draw_header(stdscr, canvas_width)
         content_top = 3
         content_height = max(1, height - 7)
         visible_lines = lines[self.row_offset : self.row_offset + content_height]
         for offset in range(content_height):
             y = content_top + offset
-            self._addnstr(stdscr, y, 1, " " * (width - 2), width - 2)
+            self._addnstr(stdscr, y, 1, " " * (canvas_width - 2), canvas_width - 2)
             self._addnstr(stdscr, y, 0, "│", 1, self._color(1))
-            self._addnstr(stdscr, y, width - 1, "│", 1, self._color(1))
+            self._addnstr(stdscr, y, canvas_width - 1, "│", 1, self._color(1))
             if offset < len(visible_lines):
                 line = visible_lines[offset]
-                visible = line[self.col_offset : self.col_offset + width - 4]
-                self._draw_styled_line(stdscr, y, 3, visible, width - 4)
+                visible = line[self.col_offset : self.col_offset + canvas_width - 4]
+                self._draw_styled_line(stdscr, y, 3, visible, canvas_width - 4)
 
-        self._draw_footer(stdscr, height, width)
-        cursor_x = min(width - 2, len(f" simplefs:{self.fs.pwd()} > ") + len(self.command))
+        self._draw_footer(stdscr, height, canvas_width)
+        cursor_x = min(canvas_width - 2, len(f" simplefs:{self.fs.pwd()} > ") + len(self.command))
         stdscr.move(height - 2, cursor_x)
         stdscr.refresh()
 
@@ -268,6 +289,7 @@ class DiskMonitor:
         self._addnstr(stdscr, height - 1, 0, "└" + "─" * (width - 2) + "┘", width, self._color(1))
 
     def _draw_small_terminal(self, stdscr, height: int, width: int) -> None:
+        canvas_width = max(1, width - 1)
         lines = [
             "SimpleFS Monitor",
             "",
@@ -278,7 +300,7 @@ class DiskMonitor:
             "Resize the terminal or press q to quit.",
         ]
         for y, line in enumerate(lines[:height]):
-            self._addnstr(stdscr, y, 0, line, width)
+            self._addnstr(stdscr, y, 0, line, canvas_width)
         stdscr.refresh()
 
     def _divider(self, title: str, width: int) -> str:

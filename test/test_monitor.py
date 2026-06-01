@@ -152,6 +152,23 @@ class TestDiskMonitorCommands(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_run_screen_resyncs_curses_after_resize_event(self):
+        temp_dir, shell, _output = self.make_shell()
+        try:
+            monitor = DiskMonitor(shell.fs)
+            stdscr = Mock()
+            stdscr.get_wch.side_effect = [curses.KEY_RESIZE, "q"]
+
+            with (
+                patch.object(monitor, "_draw"),
+                patch.object(monitor, "_invalidate_screen") as invalidate_screen,
+            ):
+                monitor._run_screen(stdscr)
+
+            invalidate_screen.assert_called_once_with(stdscr)
+        finally:
+            temp_dir.cleanup()
+
     def test_run_reports_terminal_initialization_error(self):
         temp_dir, shell, _output = self.make_shell()
         try:
@@ -163,6 +180,21 @@ class TestDiskMonitorCommands(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(DiskMonitorError, "monitor terminal error: setup failed"):
                     monitor.run()
+        finally:
+            temp_dir.cleanup()
+
+    def test_ctrl_c_exits_monitor_without_error(self):
+        temp_dir, shell, _output = self.make_shell()
+        try:
+            monitor = DiskMonitor(shell.fs)
+            with (
+                patch("cli.monitor.sys.stdin.isatty", return_value=True),
+                patch("cli.monitor.sys.stdout.isatty", return_value=True),
+                patch("cli.monitor.curses.wrapper", side_effect=KeyboardInterrupt),
+            ):
+                monitor.run()
+
+            self.assertFalse(monitor.running)
         finally:
             temp_dir.cleanup()
 
@@ -206,7 +238,7 @@ class TestDiskMonitorCommands(unittest.TestCase):
                 monitor._draw(stdscr)
 
                 stdscr.clear.assert_called_once_with()
-                stdscr.addnstr.assert_any_call(3, 1, " " * 78, 78, 0)
+                stdscr.addnstr.assert_any_call(3, 1, " " * 77, 77, 0)
 
                 stdscr.reset_mock()
                 monitor._switch_view(FILE)
@@ -214,6 +246,62 @@ class TestDiskMonitorCommands(unittest.TestCase):
 
                 stdscr.clear.assert_called_once_with()
                 stdscr.erase.assert_not_called()
+        finally:
+            temp_dir.cleanup()
+
+    def test_draw_keeps_last_terminal_column_unused(self):
+        temp_dir, shell, _output = self.make_shell()
+        try:
+            monitor = DiskMonitor(shell.fs)
+            stdscr = Mock()
+            stdscr.getmaxyx.return_value = (20, 80)
+
+            with patch.object(monitor, "_view_lines", return_value=["short"]):
+                monitor._draw(stdscr)
+
+            for call in stdscr.addnstr.call_args_list:
+                _y, x, text, limit, _attr = call.args
+                self.assertLessEqual(x + min(len(text), limit), 79)
+        finally:
+            temp_dir.cleanup()
+
+    def test_terminal_resize_forces_full_redraw(self):
+        temp_dir, shell, _output = self.make_shell()
+        try:
+            monitor = DiskMonitor(shell.fs)
+            stdscr = Mock()
+            stdscr.getmaxyx.return_value = (20, 80)
+
+            with patch.object(monitor, "_view_lines", return_value=["short"]):
+                monitor._draw(stdscr)
+
+                stdscr.reset_mock()
+                stdscr.getmaxyx.return_value = (24, 80)
+                monitor._draw(stdscr)
+
+                stdscr.clear.assert_called_once_with()
+                stdscr.erase.assert_not_called()
+
+                stdscr.reset_mock()
+                monitor._handle_key(curses.KEY_RESIZE)
+                monitor._draw(stdscr)
+
+                stdscr.clear.assert_called_once_with()
+                stdscr.erase.assert_not_called()
+        finally:
+            temp_dir.cleanup()
+
+    def test_resize_event_invalidates_physical_screen(self):
+        temp_dir, shell, _output = self.make_shell()
+        try:
+            monitor = DiskMonitor(shell.fs)
+            stdscr = Mock()
+
+            monitor._invalidate_screen(stdscr)
+
+            stdscr.clearok.assert_called_once_with(True)
+            self.assertIsNone(monitor.screen_size)
+            self.assertTrue(monitor.needs_full_redraw)
         finally:
             temp_dir.cleanup()
 
