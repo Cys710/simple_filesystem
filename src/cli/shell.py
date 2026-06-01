@@ -129,6 +129,12 @@ class Shell:
                 self._append(args)
             elif cmd == "fill":
                 self._fill(args)
+            elif cmd == "cp":
+                self._cp(args)
+            elif cmd == "mv":
+                self._mv(args)
+            elif cmd in {"rename", "rname"}:
+                self._rename(args)
             elif cmd == "rm":
                 self._rm(args)
             elif cmd == "rmdir":
@@ -374,6 +380,54 @@ class Shell:
             raise FileSystemError(str(exc)) from exc
         self._println(f"appended {written} bytes to {args[0]}")
 
+    def _cp(self, args: list[str]) -> None:
+        self._require_mount()
+        if len(args) < 2 or len(args) > 3:
+            raise FileSystemError("usage: cp [-f] source destination")
+        
+        overwrite = False
+        if args[0] == "-f":
+            overwrite = True
+            args = args[1:]
+        
+        if len(args) != 2:
+            raise FileSystemError("usage: cp [-f] source destination")
+        
+        self.fs.cp(args[0], args[1], overwrite=overwrite)
+        self._println(f"copied {args[0]} to {args[1]}")
+
+    def _mv(self, args: list[str]) -> None:
+        self._require_mount()
+        if len(args) < 2 or len(args) > 3:
+            raise FileSystemError("usage: mv [-f] source destination")
+        
+        overwrite = False
+        if args[0] == "-f":
+            overwrite = True
+            args = args[1:]
+        
+        if len(args) != 2:
+            raise FileSystemError("usage: mv [-f] source destination")
+        
+        self.fs.mv(args[0], args[1], overwrite=overwrite)
+        self._println(f"moved {args[0]} to {args[1]}")
+
+    def _rename(self, args: list[str]) -> None:
+        self._require_mount()
+        if len(args) < 2 or len(args) > 3:
+            raise FileSystemError("usage: rename [-f] old_name new_name")
+
+        overwrite = False
+        if args[0] == "-f":
+            overwrite = True
+            args = args[1:]
+
+        if len(args) != 2:
+            raise FileSystemError("usage: rename [-f] old_name new_name")
+
+        self.fs.rename(args[0], args[1], overwrite=overwrite)
+        self._println(f"renamed {args[0]} to {args[1]}")
+
     def _rm(self, args: list[str]) -> None:
         self._require_mount()
         self._expect_exact_args(args, 1, "rm file")
@@ -465,6 +519,9 @@ class Shell:
         " close fd\n" \
         " append file text\n" \
         " fill file [bytes]\n" \
+        " cp [-f] source destination\n" \
+        " mv [-f] source destination\n" \
+        " rename [-f] old_name new_name\n" \
         " rm file\n" \
         " rmdir [-r] directory\n" \
         " cd path\n" \

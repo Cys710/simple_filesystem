@@ -12,6 +12,7 @@ sys.path.insert(0, SRC)
 from head import BLOCK_SIZE, DIRECT_CNT
 from storage.object_io import pack_object
 from core.file_system import FileSystem, FileSystemError, MAX_INDIRECT_BLOCK_IDS
+from user import DEFAULT_ROOT_PASSWORD
 from utils import INDIRECT_INDEX_TEST_BYTES, append_test_data
 
 
@@ -75,6 +76,283 @@ class TestFileCommands(unittest.TestCase):
             inode, _dir_block = fs._resolve_path("/demo.bin")
             self.assertEqual(inode.size, DIRECT_CNT * BLOCK_SIZE + 1)
             self.assertIsNotNone(inode.indirect_block)
+        finally:
+            temp_dir.cleanup()
+
+    def test_cp_copies_file_and_keeps_source(self):
+        """cp: 复制文件后目标内容一致，源文件仍存在。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/a.txt")
+            fs.write_file("/a.txt", "hello")
+
+            fs.cp("/a.txt", "/b.txt")
+
+            self.assertEqual(fs.read_file("/a.txt"), b"hello")
+            self.assertEqual(fs.read_file("/b.txt"), b"hello")
+        finally:
+            temp_dir.cleanup()
+
+    def test_cp_to_directory_uses_source_basename(self):
+        """cp: 复制到目录时使用源文件 basename。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.mkdir("/dir")
+            fs.touch("/a.txt")
+            fs.write_file("/a.txt", "hello")
+
+            fs.cp("/a.txt", "/dir")
+
+            self.assertEqual(fs.read_file("/dir/a.txt"), b"hello")
+        finally:
+            temp_dir.cleanup()
+
+    def test_cp_rejects_directory_source(self):
+        """cp: 源为目录应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.mkdir("/dir")
+            with self.assertRaises(FileSystemError):
+                fs.cp("/dir", "/copy")
+        finally:
+            temp_dir.cleanup()
+
+    def test_cp_rejects_missing_source(self):
+        """cp: 源不存在应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            with self.assertRaises(FileSystemError):
+                fs.cp("/missing.txt", "/b.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_cp_overwrite_requires_flag(self):
+        """cp: 目标已存在时，未指定 overwrite 应报错；指定 overwrite 则覆盖。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/a.txt")
+            fs.write_file("/a.txt", "new")
+            fs.touch("/b.txt")
+            fs.write_file("/b.txt", "old")
+
+            with self.assertRaises(FileSystemError):
+                fs.cp("/a.txt", "/b.txt")
+
+            fs.cp("/a.txt", "/b.txt", overwrite=True)
+            self.assertEqual(fs.read_file("/b.txt"), b"new")
+        finally:
+            temp_dir.cleanup()
+
+    def test_cp_permission_denied_on_destination_directory(self):
+        """cp: 目标目录无权限（x/w）应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.login("root", DEFAULT_ROOT_PASSWORD)
+            fs.useradd("alice", "alice-pass")
+            fs.useradd("bob", "bob-pass")
+
+            fs.su("alice", "alice-pass")
+            fs.write_file("note.txt", "hello")
+
+            with self.assertRaises(FileSystemError):
+                fs.cp("/home/alice/note.txt", "/home/bob")
+        finally:
+            temp_dir.cleanup()
+
+    def test_mv_renames_in_same_directory(self):
+        """mv: 同一目录内改名，源消失，目标出现。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/a.txt")
+            fs.write_file("/a.txt", "hello")
+
+            fs.mv("/a.txt", "/b.txt")
+
+            self.assertEqual(fs.read_file("/b.txt"), b"hello")
+            with self.assertRaises(FileSystemError):
+                fs.read_file("/a.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_mv_moves_across_directories(self):
+        """mv: 跨目录移动，目标目录内出现文件。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.mkdir("/dir1")
+            fs.mkdir("/dir2")
+            fs.touch("/dir1/a.txt")
+            fs.write_file("/dir1/a.txt", "hello")
+
+            fs.mv("/dir1/a.txt", "/dir2")
+
+            self.assertEqual(fs.read_file("/dir2/a.txt"), b"hello")
+            with self.assertRaises(FileSystemError):
+                fs.read_file("/dir1/a.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_mv_overwrite_requires_flag(self):
+        """mv: 目标已存在时，未指定 overwrite 应报错；指定 overwrite 则覆盖并移动。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/a.txt")
+            fs.write_file("/a.txt", "new")
+            fs.touch("/b.txt")
+            fs.write_file("/b.txt", "old")
+
+            with self.assertRaises(FileSystemError):
+                fs.mv("/a.txt", "/b.txt")
+
+            fs.mv("/a.txt", "/b.txt", overwrite=True)
+            self.assertEqual(fs.read_file("/b.txt"), b"new")
+            with self.assertRaises(FileSystemError):
+                fs.read_file("/a.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_mv_rejects_directory_source(self):
+        """mv: 源为目录应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.mkdir("/dir")
+            with self.assertRaises(FileSystemError):
+                fs.mv("/dir", "/dir2")
+        finally:
+            temp_dir.cleanup()
+
+    def test_mv_rejects_missing_source(self):
+        """mv: 源不存在应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            with self.assertRaises(FileSystemError):
+                fs.mv("/missing.txt", "/b.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_mv_permission_denied_without_write_on_source_parent(self):
+        """mv: 源父目录无写权限（w）时，应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.login("root", DEFAULT_ROOT_PASSWORD)
+            fs.useradd("alice", "alice-pass")
+            fs.useradd("bob", "bob-pass")
+
+            fs.mkdir("/shared")
+            fs.chmod("/shared", "77")
+
+            fs.su("alice", "alice-pass")
+            fs.touch("/shared/a.txt")
+            fs.write_file("/shared/a.txt", "hello")
+            fs.chmod("/shared/a.txt", "64")
+
+            fs.su("root", DEFAULT_ROOT_PASSWORD)
+            fs.chmod("/shared", "75")
+
+            fs.su("bob", "bob-pass")
+            with self.assertRaises(FileSystemError):
+                fs.mv("/shared/a.txt", "/shared/b.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_rename_file_in_same_parent(self):
+        """rename: 同一父目录内重命名文件。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/a.txt")
+            fs.write_file("/a.txt", "hello")
+
+            fs.rename("/a.txt", "b.txt")
+
+            self.assertEqual(fs.read_file("/b.txt"), b"hello")
+            with self.assertRaises(FileSystemError):
+                fs.read_file("/a.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_rename_directory_in_same_parent(self):
+        """rename: 同一父目录内重命名目录。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.mkdir("/d1")
+            fs.rename("/d1", "d2")
+            inode, _dir = fs._resolve_dir("/d2")
+            self.assertTrue(inode.is_dir)
+            with self.assertRaises(FileSystemError):
+                fs._resolve_dir("/d1")
+        finally:
+            temp_dir.cleanup()
+
+    def test_rename_rejects_invalid_new_name(self):
+        """rename: new_name 为空或包含路径分隔符应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/a.txt")
+            with self.assertRaises(FileSystemError):
+                fs.rename("/a.txt", "")
+            with self.assertRaises(FileSystemError):
+                fs.rename("/a.txt", "x/y.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_rename_overwrite_requires_flag(self):
+        """rename: 目标已存在时，未指定 overwrite 应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/a.txt")
+            fs.touch("/b.txt")
+            with self.assertRaises(FileSystemError):
+                fs.rename("/a.txt", "b.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_rename_overwrite_replaces_file(self):
+        """rename: overwrite=True 时覆盖目标文件。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/a.txt")
+            fs.write_file("/a.txt", "new")
+            fs.touch("/b.txt")
+            fs.write_file("/b.txt", "old")
+
+            fs.rename("/a.txt", "b.txt", overwrite=True)
+
+            self.assertEqual(fs.read_file("/b.txt"), b"new")
+            with self.assertRaises(FileSystemError):
+                fs.read_file("/a.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_rename_cannot_rename_root_directory(self):
+        """rename: 根目录不可重命名。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            with self.assertRaises(FileSystemError):
+                fs.rename("/", "root2")
+        finally:
+            temp_dir.cleanup()
+
+    def test_rename_permission_denied_without_write_on_parent(self):
+        """rename: 父目录无写权限（w）时，应报错。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.login("root", DEFAULT_ROOT_PASSWORD)
+            fs.useradd("alice", "alice-pass")
+            fs.useradd("bob", "bob-pass")
+
+            fs.mkdir("/shared")
+            fs.chmod("/shared", "77")
+
+            fs.su("alice", "alice-pass")
+            fs.touch("/shared/a.txt")
+            fs.write_file("/shared/a.txt", "hello")
+            fs.chmod("/shared/a.txt", "64")
+
+            fs.su("root", DEFAULT_ROOT_PASSWORD)
+            fs.chmod("/shared", "75")
+
+            fs.su("bob", "bob-pass")
+            with self.assertRaises(FileSystemError):
+                fs.rename("/shared/a.txt", "b.txt")
         finally:
             temp_dir.cleanup()
 

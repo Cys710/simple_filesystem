@@ -383,6 +383,201 @@ class FileSystem:
 
         self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
 
+    # cp 复制文件，支持跨目录复制
+    def cp(self, src: str, dst: str, *, overwrite: bool = False) -> None:
+        # 解析源文件路径
+        src_inode, _ = self._resolve_path(src)
+        if src_inode.is_dir:
+            raise FileSystemError(f"cannot copy directory: {src}")
+        
+        # 检查源文件读取权限
+        self._check_permission(src_inode, "r")
+        
+        # 读取源文件内容
+        src_data = self._read_file_inode(src_inode.inode_id)
+        
+        # 解析目标路径
+        try:
+            dst_inode, dst_dir = self._resolve_dir(dst)
+            # 如果目标是目录，则在目录下创建同名文件
+            dst_parent_inode = dst_inode
+            dst_parent_dir = dst_dir
+            dst_name = posixpath.basename(self._normalize_path(src))
+            dst_is_dir = True
+        except FileSystemError:
+            # 如果目标不是目录，则解析父目录
+            dst_parent_inode, dst_parent_dir, dst_name = self._resolve_parent(dst)
+            dst_is_dir = False
+        
+        # 检查目标父目录写入和执行权限
+        self._check_permission(dst_parent_inode, "w")
+        self._check_permission(dst_parent_inode, "x")
+        
+        # 检查目标是否已存在
+        if dst_name in dst_parent_dir.son_files:
+            if not overwrite:
+                raise FileSystemError(f"file already exists: {dst}")
+            # 如果允许覆盖，先删除现有文件
+            existing_inode_id = dst_parent_dir.son_files[dst_name]
+            with open_disk(self.path) as fp:
+                self.super_block = read_super_block(fp)
+                existing_inode = read_inode(fp, existing_inode_id)
+                self._free_inode_data_blocks(fp, existing_inode)
+                self._free_inode_id(existing_inode_id)
+                clear_inode_slot(fp, existing_inode_id)
+        
+        # 创建新文件并写入数据
+        with open_disk(self.path) as fp:
+            self.super_block = read_super_block(fp)
+            inode_id = self._alloc_inode_id()
+            
+            inode = Inode(inode_id, self._current_user_id(), src_inode.mode)
+            inode.is_dir = False
+            
+            dst_parent_dir.add_new_file(dst_name, inode_id)
+            
+            write_inode(fp, inode_id, inode)
+            self._write_dir(fp, dst_parent_inode, dst_parent_dir)
+            write_super_block(fp, self.super_block)
+        
+        # 构建目标文件路径
+        if dst_is_dir:
+            target_path = posixpath.join(dst, posixpath.basename(self._normalize_path(src)))
+        else:
+            target_path = dst
+        
+        # 写入文件内容
+        self.write_file(self._normalize_path(target_path), src_data)
+        
+        self._refresh_cwd_if_changed(dst_parent_inode.inode_id, dst_parent_dir)
+
+    # mv 移动或重命名文件
+    def mv(self, src: str, dst: str, *, overwrite: bool = False) -> None:
+        # 解析源文件路径
+        src_inode, _ = self._resolve_path(src)
+        if src_inode.is_dir:
+            raise FileSystemError(f"cannot move directory: {src}")
+        
+        # 检查源文件读取权限（需要读取源文件内容）
+        self._check_permission(src_inode, "r")
+        
+        # 解析源文件父目录
+        src_parent_inode, src_parent_dir, src_name = self._resolve_parent(src)
+        
+        # 检查源文件父目录写入权限（需要从源目录删除文件）
+        self._check_permission(src_parent_inode, "w")
+        self._check_permission(src_parent_inode, "x")
+        
+        # 解析目标路径
+        try:
+            dst_inode, dst_dir = self._resolve_dir(dst)
+            # 如果目标是目录，则在目录下使用同名文件
+            dst_parent_inode = dst_inode
+            dst_parent_dir = dst_dir
+            dst_name = posixpath.basename(self._normalize_path(src))
+            dst_is_dir = True
+        except FileSystemError:
+            # 如果目标不是目录，则解析父目录
+            dst_parent_inode, dst_parent_dir, dst_name = self._resolve_parent(dst)
+            dst_is_dir = False
+        
+        # 检查目标父目录写入和执行权限
+        self._check_permission(dst_parent_inode, "w")
+        self._check_permission(dst_parent_inode, "x")
+        
+        # 如果源和目标相同，直接返回
+        if src_parent_inode.inode_id == dst_parent_inode.inode_id and src_name == dst_name:
+            return
+        
+        # 检查目标是否已存在
+        if dst_name in dst_parent_dir.son_files:
+            if not overwrite:
+                raise FileSystemError(f"file already exists: {dst}")
+            # 如果允许覆盖，先删除现有文件
+            existing_inode_id = dst_parent_dir.son_files[dst_name]
+            with open_disk(self.path) as fp:
+                self.super_block = read_super_block(fp)
+                existing_inode = read_inode(fp, existing_inode_id)
+                self._free_inode_data_blocks(fp, existing_inode)
+                self._free_inode_id(existing_inode_id)
+                clear_inode_slot(fp, existing_inode_id)
+        
+        # 移动文件
+        with open_disk(self.path) as fp:
+            self.super_block = read_super_block(fp)
+            
+            if src_parent_inode.inode_id == dst_parent_inode.inode_id:
+                # 同一个目录内重命名
+                src_parent_dir.son_files.pop(src_name)
+                src_parent_dir.son_files[dst_name] = src_inode.inode_id
+                self._write_dir(fp, src_parent_inode, src_parent_dir)
+            else:
+                # 不同目录间移动：从源目录删除，添加到目标目录
+                src_parent_dir.remove(src_name, FILE_TYPE)
+                self._write_dir(fp, src_parent_inode, src_parent_dir)
+                
+                # 添加到目标目录
+                dst_parent_dir.add_new_file(dst_name, src_inode.inode_id)
+                self._write_dir(fp, dst_parent_inode, dst_parent_dir)
+            
+            write_super_block(fp, self.super_block)
+        
+        # 如果移动到了不同目录，需要刷新两个目录的缓存
+        self._refresh_cwd_if_changed(src_parent_inode.inode_id, src_parent_dir)
+        self._refresh_cwd_if_changed(dst_parent_inode.inode_id, dst_parent_dir)
+
+    # rename 重命名文件或目录（仅支持同一父目录内改名；跨目录请用 mv）
+    def rename(self, src: str, new_name: str, *, overwrite: bool = False) -> None:
+        if not new_name:
+            raise FileSystemError("new name cannot be empty")
+        if "/" in new_name:
+            raise FileSystemError("rename does not support path; use mv for moving across directories")
+
+        normalized_src = self._normalize_path(src)
+        if normalized_src == BASE_NAME:
+            raise FileSystemError("cannot rename root directory")
+
+        parent_inode, parent_dir, old_name = self._resolve_parent(normalized_src)
+        self._check_permission(parent_inode, "w")
+        self._check_permission(parent_inode, "x")
+
+        src_is_file = old_name in parent_dir.son_files
+        src_is_dir = old_name in parent_dir.son_dirs
+        if not src_is_file and not src_is_dir:
+            raise FileSystemError(f"path not found: {src}")
+
+        if old_name == new_name:
+            return
+
+        if new_name in parent_dir.son_files or new_name in parent_dir.son_dirs:
+            if not overwrite:
+                raise FileSystemError(f"file already exists: {new_name}")
+            if src_is_dir:
+                raise FileSystemError("cannot overwrite when renaming a directory")
+            if new_name in parent_dir.son_dirs:
+                raise FileSystemError("cannot overwrite a directory")
+
+            existing_inode_id = parent_dir.son_files[new_name]
+            with open_disk(self.path) as fp:
+                self.super_block = read_super_block(fp)
+                existing_inode = read_inode(fp, existing_inode_id)
+                self._free_inode_data_blocks(fp, existing_inode)
+                self._free_inode_id(existing_inode_id)
+                clear_inode_slot(fp, existing_inode_id)
+                parent_dir.remove(new_name, FILE_TYPE)
+                write_super_block(fp, self.super_block)
+
+        with open_disk(self.path) as fp:
+            if src_is_file:
+                inode_id = parent_dir.son_files.pop(old_name)
+                parent_dir.son_files[new_name] = inode_id
+            else:
+                inode_id = parent_dir.son_dirs.pop(old_name)
+                parent_dir.son_dirs[new_name] = inode_id
+            self._write_dir(fp, parent_inode, parent_dir)
+
+        self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
+
     # rmdir 删除指定路径的目录，目录必须为空
     def rmdir(self, path: str, *, recursive: bool = False) -> None:
         normalized = self._normalize_path(path)
