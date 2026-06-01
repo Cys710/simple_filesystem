@@ -1,5 +1,5 @@
 """
-    curses based full-screen monitor for the teaching file system.
+    为本次课设文件系统提供一个基于 curses 的全屏监控界面
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ class DiskMonitor:
         self.needs_full_redraw = True
         self.screen_size: tuple[int, int] | None = None
 
+    # run() 检查当前环境是否支持交互式终端，然后启动 curses 全屏监控界面，并将中断或终端错误转换为可控的退出或异常
     def run(self) -> None:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise DiskMonitorError("monitor requires an interactive terminal")
@@ -57,7 +58,8 @@ class DiskMonitor:
             self.running = False
         except curses.error as exc:
             raise DiskMonitorError(f"monitor terminal error: {exc}") from exc
-
+        
+    # _run_screen() 初始化终端界面并持续绘制画面、读取和处理用户按键，同时处理窗口缩放及临时无输入的情况。
     def _run_screen(self, stdscr) -> None:
         try:
             curses.curs_set(1)
@@ -80,7 +82,7 @@ class DiskMonitor:
             if key == curses.KEY_RESIZE:
                 self._invalidate_screen(stdscr)
             self._handle_key(key)
-
+    # _handle_key() 根据用户按键执行命令输入与提交、视图切换、内容滚动、手动刷新或退出监控器。
     def _handle_key(self, key) -> None:
         if key == curses.KEY_RESIZE:
             self.needs_full_redraw = True
@@ -123,6 +125,7 @@ class DiskMonitor:
         elif isinstance(key, str) and key.isprintable():
             self.command += key
 
+    # _execute_command() 解析用户输入，直接处理监控器专属命令，并将其他文件系统命令转发给 Shell 执行。
     def _execute_command(self, command: str) -> None:
         try:
             argv = shlex.split(command)
@@ -172,12 +175,14 @@ class DiskMonitor:
 
         self.message = self.command_executor(command) or f"Executed: {command}"
 
+    # _switch_view() 在切换视图时重置滚动位置
     def _switch_view(self, view: str) -> None:
         self.view = view
         self.row_offset = 0
         self.col_offset = 0
         self.needs_full_redraw = True
 
+    # _invalidate_screen() 在终端状态变化时清除旧尺寸信息，两者都会触发完整重绘。
     def _invalidate_screen(self, stdscr) -> None:
         try:
             stdscr.clearok(True)
@@ -186,6 +191,7 @@ class DiskMonitor:
         self.screen_size = None
         self.needs_full_redraw = True
 
+    # _draw() 根据终端尺寸和当前滚动位置生成可见内容，并绘制监控器的标题、正文、边框、页脚和输入光标。
     def _draw(self, stdscr) -> None:
         height, width = stdscr.getmaxyx()
         screen_size = (height, width)
@@ -228,6 +234,7 @@ class DiskMonitor:
         stdscr.move(height - 2, cursor_x)
         stdscr.refresh()
 
+    # _view_lines() 根据当前视图，将文件系统的 inode、块组、数据块或单个文件索引信息转换为可绘制的文本列表。
     def _view_lines(self, inspector: FileSystemInspector, width: int) -> list[str]:
         inode_info = inspector.inode_bitmap()
         group_info = inspector.free_groups()
@@ -265,7 +272,8 @@ class DiskMonitor:
         return [self._divider("Single File Index", width - 2)] + (
             self.visualizer.render_file_index(inspector.file_index(self.index_path))
         )
-
+    
+    # _draw_header() 绘制包含居中标题、当前路径、当前视图和快捷键说明的监控器顶部区域。
     def _draw_header(self, stdscr, width: int) -> None:
         title = " SimpleFS Monitor "
         line = "┌" + "─" * max(0, width - 2) + "┐"
@@ -279,7 +287,7 @@ class DiskMonitor:
         )
         self._addnstr(stdscr, 1, 0, status[: width - 1].ljust(width - 1) + "│", width)
         self._addnstr(stdscr, 2, 0, "├" + "─" * (width - 2) + "┤", width, self._color(1))
-
+    # _draw_footer() 在界面底部绘制日志信息、当前路径下的命令输入框以及边框。
     def _draw_footer(self, stdscr, height: int, width: int) -> None:
         self._addnstr(stdscr, height - 4, 0, "├" + "─" * (width - 2) + "┤", width, self._color(1))
         message = f"│ Log: {self.message}"
@@ -288,6 +296,8 @@ class DiskMonitor:
         self._addnstr(stdscr, height - 2, 0, prompt[:width].ljust(width), width, curses.A_REVERSE)
         self._addnstr(stdscr, height - 1, 0, "└" + "─" * (width - 2) + "┘", width, self._color(1))
 
+    # 提供绘图辅助功能：处理小窗口、生成分隔线、初始化颜色、安全绘制文本，以及为特定符号添加颜色。
+    # 当终端窗口过小时，绘制简化提示界面。
     def _draw_small_terminal(self, stdscr, height: int, width: int) -> None:
         canvas_width = max(1, width - 1)
         lines = [
@@ -303,13 +313,15 @@ class DiskMonitor:
             self._addnstr(stdscr, y, 0, line, canvas_width)
         stdscr.refresh()
 
+    # 生成带有居中标题的分隔线。
     def _divider(self, title: str, width: int) -> str:
         title = f" {title} "
         available = max(0, width - len(title) - 2)
         left = available // 2
         right = available - left
         return "├" + "─" * left + title + "─" * right + "┤"
-
+    
+    # 初始化终端颜色。
     def _init_colors(self) -> None:
         try:
             curses.use_default_colors()
@@ -324,19 +336,21 @@ class DiskMonitor:
             curses.init_pair(8, curses.COLOR_WHITE, -1)
         except curses.error:
             pass
-
+    # 根据编号获取颜色样式。
     def _color(self, pair: int) -> int:
         try:
             return curses.color_pair(pair)
         except curses.error:
             return 0
-
+        
+    # 对 curses.addnstr() 的安全封装
     def _addnstr(self, stdscr, y: int, x: int, text: str, n: int, attr: int = 0) -> None:
         try:
             stdscr.addnstr(y, x, text, n, attr)
         except curses.error:
             pass
 
+    # 绘制一行文本，并为文件系统状态符号添加颜色。
     def _draw_styled_line(self, stdscr, y: int, x: int, text: str, width: int) -> None:
         symbol_attrs = {
             "D": self._color(2) | curses.A_BOLD,
