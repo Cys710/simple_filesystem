@@ -458,8 +458,8 @@ class FileSystem:
         # 检查源文件读取权限
         self._check_permission(src_inode, "r")
         
-        # 读取源文件内容
-        src_data = self._read_file_inode(src_inode.inode_id)
+        # 读取源文件内容，并遵守源文件的共享读锁规则
+        src_data = self.read_file(src)
         
         # 解析目标路径
         try:
@@ -484,12 +484,16 @@ class FileSystem:
                 raise FileSystemError(f"file already exists: {dst}")
             # 如果允许覆盖，先删除现有文件
             existing_inode_id = dst_parent_dir.son_files[dst_name]
+            self._ensure_inode_not_in_use(existing_inode_id)
             with open_disk(self.path) as fp:
                 self.super_block = read_super_block(fp)
-                existing_inode = read_inode(fp, existing_inode_id)
-                self._free_inode_data_blocks(fp, existing_inode)
+                with self._hold_inode(existing_inode_id) as memory_inode:
+                    self._free_inode_data_blocks(fp, memory_inode.inode)
+                self._discard_cached_inode(existing_inode_id)
                 self._free_inode_id(existing_inode_id)
                 clear_inode_slot(fp, existing_inode_id)
+                dst_parent_dir.remove(dst_name, FILE_TYPE)
+                write_super_block(fp, self.super_block)
         
         # 创建新文件并写入数据
         with open_disk(self.path) as fp:
@@ -560,12 +564,16 @@ class FileSystem:
                 raise FileSystemError(f"file already exists: {dst}")
             # 如果允许覆盖，先删除现有文件
             existing_inode_id = dst_parent_dir.son_files[dst_name]
+            self._ensure_inode_not_in_use(existing_inode_id)
             with open_disk(self.path) as fp:
                 self.super_block = read_super_block(fp)
-                existing_inode = read_inode(fp, existing_inode_id)
-                self._free_inode_data_blocks(fp, existing_inode)
+                with self._hold_inode(existing_inode_id) as memory_inode:
+                    self._free_inode_data_blocks(fp, memory_inode.inode)
+                self._discard_cached_inode(existing_inode_id)
                 self._free_inode_id(existing_inode_id)
                 clear_inode_slot(fp, existing_inode_id)
+                dst_parent_dir.remove(dst_name, FILE_TYPE)
+                write_super_block(fp, self.super_block)
         
         # 移动文件
         with open_disk(self.path) as fp:
@@ -623,10 +631,12 @@ class FileSystem:
                 raise FileSystemError("cannot overwrite a directory")
 
             existing_inode_id = parent_dir.son_files[new_name]
+            self._ensure_inode_not_in_use(existing_inode_id)
             with open_disk(self.path) as fp:
                 self.super_block = read_super_block(fp)
-                existing_inode = read_inode(fp, existing_inode_id)
-                self._free_inode_data_blocks(fp, existing_inode)
+                with self._hold_inode(existing_inode_id) as memory_inode:
+                    self._free_inode_data_blocks(fp, memory_inode.inode)
+                self._discard_cached_inode(existing_inode_id)
                 self._free_inode_id(existing_inode_id)
                 clear_inode_slot(fp, existing_inode_id)
                 parent_dir.remove(new_name, FILE_TYPE)

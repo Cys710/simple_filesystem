@@ -204,6 +204,36 @@ class TestFileSystemInodeLocks(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_cp_rejects_source_locked_for_writing(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fd = fs.open("/note.txt", "a")
+
+            with self.assertRaisesRegex(FileSystemError, "locked for writing"):
+                fs.cp("/note.txt", "/copy.txt")
+
+            fs.close(fd)
+        finally:
+            temp_dir.cleanup()
+
+    def test_overwrite_operations_reject_open_target_file(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.write_file("/source.txt", "new")
+            fs.write_file("/target.txt", "old")
+            fd = fs.open("/target.txt", "r")
+
+            with self.assertRaisesRegex(FileSystemError, "still in use"):
+                fs.cp("/source.txt", "/target.txt", overwrite=True)
+            with self.assertRaisesRegex(FileSystemError, "still in use"):
+                fs.mv("/source.txt", "/target.txt", overwrite=True)
+            with self.assertRaisesRegex(FileSystemError, "still in use"):
+                fs.rename("/source.txt", "target.txt", overwrite=True)
+
+            fs.close(fd)
+        finally:
+            temp_dir.cleanup()
+
 
 class TestShellInodeCacheLifecycle(unittest.TestCase):
     def test_exit_closes_open_fds_and_flushes_dirty_inode(self):
