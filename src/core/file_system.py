@@ -6,21 +6,24 @@ from __future__ import annotations
 
 import fnmatch
 import posixpath
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable
+from typing import Iterator
 
 from head import *
 from storage.disk import open_disk, read_block, write_block
 from core.format_disk import format_disk, read_super_block, write_super_block
 from storage.inode_io import clear_inode_slot, read_inode, write_inode
 from core.mount import MountedFileSystem, mount
+from core.inode_cache import InodeCache, InodeCacheError, MemoryInode
 from dataStruct.open_file import OpenFile, parse_open_mode
 from storage.object_io import ObjectIOError, pack_object, read_object, write_object
 
-from dataStruct.data import DirBlock, SuperBlock  
-from dataStruct import Inode  
+from dataStruct.data import DirBlock, SuperBlock
+from dataStruct import Inode
 from dataStruct.Inode import DEFAULT_DIR_MODE, DEFAULT_FILE_MODE, PRIVATE_DIR_MODE
-from user import User, create_root_user
+from user import User
 
 # 间接索引块 安全存储的最大数据块数量
 MAX_INDIRECT_BLOCK_IDS = BLOCK_SIZE // 4 - 2
@@ -36,12 +39,15 @@ class FileSystem:
         self.path = mounted.path
         self.super_block = mounted.super_block
         self.current_user: User | None = None
-        self.cwd_inode = mounted.root_inode
+        self.inode_cache = InodeCache(self.path)
+        self._cwd_memory_inode = self.iget(ROOT_ID)
+        self.cwd_inode = self._cwd_memory_inode.inode
         self.cwd_dir = mounted.root_dir
         self.cwd_path = BASE_NAME
         # 打开文件表，key 是文件描述符，value 是 OpenFile 对象
         self.open_file_table: dict[int, OpenFile] = {}
         self.next_fd = 3
+        self._closed = False
 
     # format_and_mount 格式化磁盘并挂载
     @classmethod
@@ -54,6 +60,41 @@ class FileSystem:
     def mount(cls, path: str | Path = DISK_NAME) -> "FileSystem":
         return cls(mount(path))
 
+    # iget 获取指定 inode 的共享内存副本，并增加一次引用
+    def iget(self, inode_id: int) -> MemoryInode:
+        try:
+            return self.inode_cache.iget(inode_id)
+        except InodeCacheError as exc:
+            raise FileSystemError(str(exc)) from exc
+
+    # iput 释放一次内存 inode 引用
+    def iput(self, memory_inode: MemoryInode) -> None:
+        try:
+            self.inode_cache.iput(memory_inode)
+        except InodeCacheError as exc:
+            raise FileSystemError(str(exc)) from exc
+
+    # sync 将全部脏 inode 写回磁盘
+    def sync(self) -> None:
+        try:
+            self.inode_cache.flush()
+        except InodeCacheError as exc:
+            raise FileSystemError(str(exc)) from exc
+
+    # shutdown 关闭 fd、写回脏 inode，并释放当前目录引用
+    def shutdown(self) -> None:
+        if self._closed:
+            return
+        self.close_all()
+        self.sync()
+        self.iput(self._cwd_memory_inode)
+        self._closed = True
+
+    # close_all 关闭全部文件描述符
+    def close_all(self) -> None:
+        for fd in list(self.open_file_table):
+            self.close(fd)
+
     # 用户操作接口：ls 返回目录下的 (name, type) 列表
     def ls(self, path: str = ".") -> list[tuple[str, int]]:
 
@@ -61,10 +102,10 @@ class FileSystem:
         self._check_permission(inode, "r")
         self._check_permission(inode, "x")
         return dir_block.file_name_and_types()
-    
+
     # mkdir 创建目录，返回新目录的 inode id
     def mkdir(self, path: str) -> int:
-        
+
         # 解析路径，获取父目录的 inode 和 DirBlock，以及新建目录的名字
         parent_inode, parent_dir, name = self._resolve_parent(path)
         if not name:
@@ -127,7 +168,10 @@ class FileSystem:
 
         inode, dir_block = self._resolve_dir(path)
         self._check_permission(inode, "x")
-        self.cwd_inode = inode
+        new_cwd_memory_inode = self.iget(inode.inode_id)
+        self.iput(self._cwd_memory_inode)
+        self._cwd_memory_inode = new_cwd_memory_inode
+        self.cwd_inode = new_cwd_memory_inode.inode
         self.cwd_dir = dir_block
         self.cwd_path = self._normalize_path(path)
         return self.cwd_path
@@ -166,11 +210,11 @@ class FileSystem:
             self._ensure_dir_exists("/home")
             self.mkdir(home_path)
             home_inode, _home_dir = self._resolve_dir(home_path)
-            home_inode.owner_id = user_id
-            home_inode.user_id = user_id
-            home_inode.mode = PRIVATE_DIR_MODE
-            with open_disk(self.path) as fp:
-                write_inode(fp, home_inode.inode_id, home_inode)
+            with self._hold_inode(home_inode.inode_id) as memory_inode:
+                memory_inode.inode.owner_id = user_id
+                memory_inode.inode.user_id = user_id
+                memory_inode.inode.mode = PRIVATE_DIR_MODE
+                self._mark_inode_dirty(memory_inode)
             user = User(username, password, user_id, home_path)
             self.super_block.users[username] = user
             self._write_super_block_to_disk()
@@ -218,9 +262,9 @@ class FileSystem:
         mode_value = self._parse_mode(mode)
         if not self._is_root_user() and self._current_user_id() != self._inode_owner_id(inode):
             raise FileSystemError("permission denied")
-        inode.mode = mode_value
-        with open_disk(self.path) as fp:
-            write_inode(fp, inode.inode_id, inode)
+        with self._hold_inode(inode.inode_id) as memory_inode:
+            memory_inode.inode.mode = mode_value
+            self._mark_inode_dirty(memory_inode)
 
     # stat 返回文件或目录的关键元数据
     def stat(self, path: str) -> dict[str, object]:
@@ -303,32 +347,51 @@ class FileSystem:
         if writable:
             self._check_permission(inode, "w")
 
-        # 如果打开模式要求截断文件，则将文件内容清空
-        if truncate:
-            self._write_file_inode(inode.inode_id, b"")
-            inode = self._read_inode(inode.inode_id)
-
-        # 分配一个新的文件描述符，并在打开文件表
-        # 记录该文件的 inode id、路径、打开模式、当前偏移量等信息
+        # 分配文件描述符并让打开文件表持有内存 inode 的长期引用。
         fd = self.next_fd
         self.next_fd += 1
-        if offset < 0:
-            offset = inode.size
+        memory_inode = self.iget(inode.inode_id)
+        try:
+            lock_mode = "write" if writable else "read"
+            if writable:
+                self.inode_cache.acquire_write(memory_inode, fd)
+            else:
+                self.inode_cache.acquire_read(memory_inode, fd)
 
-        self.open_file_table[fd] = OpenFile(
-            fd=fd,
-            inode_id=inode.inode_id,
-            path=self._normalize_path(path),
-            mode=mode,
-            offset=offset,
-            readable=readable,
-            writable=writable,
-        )
+            # 必须先成功获取写锁，再截断文件。
+            if truncate:
+                self._write_file_memory_inode(memory_inode, b"")
+            if offset < 0:
+                offset = memory_inode.inode.size
+
+            self.open_file_table[fd] = OpenFile(
+                fd=fd,
+                memory_inode=memory_inode,
+                path=self._normalize_path(path),
+                mode=mode,
+                offset=offset,
+                readable=readable,
+                writable=writable,
+                lock_mode=lock_mode,
+            )
+        except InodeCacheError as exc:
+            self.inode_cache.release_access(memory_inode, fd)
+            self.iput(memory_inode)
+            raise FileSystemError(str(exc)) from exc
+        except Exception:
+            self.inode_cache.release_access(memory_inode, fd)
+            self.iput(memory_inode)
+            raise
         return fd
 
     # close 关闭文件，释放文件描述符
     def close(self, fd: int) -> None:
-        self._get_open_file(fd)
+        open_file = self._get_open_file(fd)
+        try:
+            self.inode_cache.release_access(open_file.memory_inode, fd)
+            self.iput(open_file.memory_inode)
+        except InodeCacheError as exc:
+            raise FileSystemError(str(exc)) from exc
         del self.open_file_table[fd]
 
     # read 从文件描述符对应的文件中读取数据，返回 bytes
@@ -341,13 +404,13 @@ class FileSystem:
         if size < -1:
             raise FileSystemError("read size cannot be less than -1")
 
-        data = self._read_file_inode(open_file.inode_id)
+        data = self._read_file_memory_inode(open_file.memory_inode)
         start = min(open_file.offset, len(data))
         end = len(data) if size == -1 else min(start + size, len(data))
         chunk = data[start:end]
         open_file.offset = end
         return chunk
-    
+
     # write 向文件描述符对应的文件中写入数据，返回写入的字节数
     def write(self, fd: int, data: bytes | str) -> int:
         open_file = self._get_open_file(fd)
@@ -358,20 +421,20 @@ class FileSystem:
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("data must be bytes or str")
 
-        old_data = self._read_file_inode(open_file.inode_id)
+        old_data = self._read_file_memory_inode(open_file.memory_inode)
         offset = open_file.offset
         if offset > len(old_data):
             old_data = old_data + b"\x00" * (offset - len(old_data))
 
         new_data = old_data[:offset] + bytes(data) + old_data[offset + len(data):]
-        self._write_file_inode(open_file.inode_id, new_data)
+        self._write_file_memory_inode(open_file.memory_inode, new_data)
         open_file.offset = offset + len(data)
         return len(data)
 
     # seek 调整文件描述符对应的文件的当前偏移量，返回新的偏移量
     def seek(self, fd: int, offset: int, whence: int = 0) -> int:
         open_file = self._get_open_file(fd)
-        inode = self._read_inode(open_file.inode_id)
+        inode = open_file.memory_inode.inode
 
         if whence == 0:
             new_offset = offset
@@ -414,17 +477,196 @@ class FileSystem:
         inode_id = parent_dir.son_files.get(name)
         if inode_id is None:
             raise FileSystemError(f"file not found: {path}")
-
         with open_disk(self.path) as fp:
             self.super_block = read_super_block(fp)
-            if self._count_file_references(fp, inode_id) <= 1:
-                inode = read_inode(fp, inode_id)
-                self._free_inode_data_blocks(fp, inode)
-                self._free_inode_id(inode_id)
-                clear_inode_slot(fp, inode_id)
-            parent_dir.remove(name, FILE_TYPE)
+            self._remove_file_link(fp, parent_dir, name, inode_id)
             self._write_dir(fp, parent_inode, parent_dir)
             write_super_block(fp, self.super_block)
+
+        self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
+
+    # cp 复制文件，支持跨目录复制
+    def cp(self, src: str, dst: str, *, overwrite: bool = False) -> None:
+        # 解析源文件路径
+        src_inode, _ = self._resolve_path(src)
+        if src_inode.is_dir:
+            raise FileSystemError(f"cannot copy directory: {src}")
+
+        # 检查源文件读取权限
+        self._check_permission(src_inode, "r")
+
+        # 读取源文件内容，并遵守源文件的共享读锁规则
+        src_data = self.read_file(src)
+
+        # 解析目标路径
+        try:
+            dst_inode, dst_dir = self._resolve_dir(dst)
+            # 如果目标是目录，则在目录下创建同名文件
+            dst_parent_inode = dst_inode
+            dst_parent_dir = dst_dir
+            dst_name = posixpath.basename(self._normalize_path(src))
+            dst_is_dir = True
+        except FileSystemError:
+            # 如果目标不是目录，则解析父目录
+            dst_parent_inode, dst_parent_dir, dst_name = self._resolve_parent(dst)
+            dst_is_dir = False
+
+        # 检查目标父目录写入和执行权限
+        self._check_permission(dst_parent_inode, "w")
+        self._check_permission(dst_parent_inode, "x")
+
+        # 检查目标是否已存在
+        if dst_name in dst_parent_dir.son_files:
+            if not overwrite:
+                raise FileSystemError(f"file already exists: {dst}")
+            existing_inode_id = dst_parent_dir.son_files[dst_name]
+            with open_disk(self.path) as fp:
+                self.super_block = read_super_block(fp)
+                self._remove_file_link(fp, dst_parent_dir, dst_name, existing_inode_id)
+                write_super_block(fp, self.super_block)
+
+        # 创建新文件并写入数据
+        with open_disk(self.path) as fp:
+            self.super_block = read_super_block(fp)
+            inode_id = self._alloc_inode_id()
+
+            inode = Inode(inode_id, self._current_user_id(), src_inode.mode)
+            inode.is_dir = False
+
+            dst_parent_dir.add_new_file(dst_name, inode_id)
+
+            write_inode(fp, inode_id, inode)
+            self._write_dir(fp, dst_parent_inode, dst_parent_dir)
+            write_super_block(fp, self.super_block)
+
+        # 构建目标文件路径
+        if dst_is_dir:
+            target_path = posixpath.join(dst, posixpath.basename(self._normalize_path(src)))
+        else:
+            target_path = dst
+
+        # 写入文件内容
+        self.write_file(self._normalize_path(target_path), src_data)
+
+        self._refresh_cwd_if_changed(dst_parent_inode.inode_id, dst_parent_dir)
+
+    # mv 移动或重命名文件
+    def mv(self, src: str, dst: str, *, overwrite: bool = False) -> None:
+        # 解析源文件路径
+        src_inode, _ = self._resolve_path(src)
+        if src_inode.is_dir:
+            raise FileSystemError(f"cannot move directory: {src}")
+
+        # 检查源文件读取权限（需要读取源文件内容）
+        self._check_permission(src_inode, "r")
+
+        # 解析源文件父目录
+        src_parent_inode, src_parent_dir, src_name = self._resolve_parent(src)
+
+        # 检查源文件父目录写入权限（需要从源目录删除文件）
+        self._check_permission(src_parent_inode, "w")
+        self._check_permission(src_parent_inode, "x")
+
+        # 解析目标路径
+        try:
+            dst_inode, dst_dir = self._resolve_dir(dst)
+            # 如果目标是目录，则在目录下使用同名文件
+            dst_parent_inode = dst_inode
+            dst_parent_dir = dst_dir
+            dst_name = posixpath.basename(self._normalize_path(src))
+            dst_is_dir = True
+        except FileSystemError:
+            # 如果目标不是目录，则解析父目录
+            dst_parent_inode, dst_parent_dir, dst_name = self._resolve_parent(dst)
+            dst_is_dir = False
+
+        # 检查目标父目录写入和执行权限
+        self._check_permission(dst_parent_inode, "w")
+        self._check_permission(dst_parent_inode, "x")
+
+        # 如果源和目标相同，直接返回
+        if src_parent_inode.inode_id == dst_parent_inode.inode_id and src_name == dst_name:
+            return
+
+        # 检查目标是否已存在
+        if dst_name in dst_parent_dir.son_files:
+            if not overwrite:
+                raise FileSystemError(f"file already exists: {dst}")
+            existing_inode_id = dst_parent_dir.son_files[dst_name]
+            with open_disk(self.path) as fp:
+                self.super_block = read_super_block(fp)
+                self._remove_file_link(fp, dst_parent_dir, dst_name, existing_inode_id)
+                write_super_block(fp, self.super_block)
+
+        # 移动文件
+        with open_disk(self.path) as fp:
+            self.super_block = read_super_block(fp)
+
+            if src_parent_inode.inode_id == dst_parent_inode.inode_id:
+                # 同一个目录内重命名
+                src_parent_dir.son_files.pop(src_name)
+                src_parent_dir.son_files[dst_name] = src_inode.inode_id
+                self._write_dir(fp, src_parent_inode, src_parent_dir)
+            else:
+                # 不同目录间移动：从源目录删除，添加到目标目录
+                src_parent_dir.remove(src_name, FILE_TYPE)
+                self._write_dir(fp, src_parent_inode, src_parent_dir)
+
+                # 添加到目标目录
+                dst_parent_dir.add_new_file(dst_name, src_inode.inode_id)
+                self._write_dir(fp, dst_parent_inode, dst_parent_dir)
+
+            write_super_block(fp, self.super_block)
+
+        # 如果移动到了不同目录，需要刷新两个目录的缓存
+        self._refresh_cwd_if_changed(src_parent_inode.inode_id, src_parent_dir)
+        self._refresh_cwd_if_changed(dst_parent_inode.inode_id, dst_parent_dir)
+
+    # rename 重命名文件或目录（仅支持同一父目录内改名；跨目录请用 mv）
+    def rename(self, src: str, new_name: str, *, overwrite: bool = False) -> None:
+        if not new_name:
+            raise FileSystemError("new name cannot be empty")
+        if "/" in new_name:
+            raise FileSystemError("rename does not support path; use mv for moving across directories")
+
+        normalized_src = self._normalize_path(src)
+        if normalized_src == BASE_NAME:
+            raise FileSystemError("cannot rename root directory")
+
+        parent_inode, parent_dir, old_name = self._resolve_parent(normalized_src)
+        self._check_permission(parent_inode, "w")
+        self._check_permission(parent_inode, "x")
+
+        src_is_file = old_name in parent_dir.son_files
+        src_is_dir = old_name in parent_dir.son_dirs
+        if not src_is_file and not src_is_dir:
+            raise FileSystemError(f"path not found: {src}")
+
+        if old_name == new_name:
+            return
+
+        if new_name in parent_dir.son_files or new_name in parent_dir.son_dirs:
+            if not overwrite:
+                raise FileSystemError(f"file already exists: {new_name}")
+            if src_is_dir:
+                raise FileSystemError("cannot overwrite when renaming a directory")
+            if new_name in parent_dir.son_dirs:
+                raise FileSystemError("cannot overwrite a directory")
+
+            existing_inode_id = parent_dir.son_files[new_name]
+            with open_disk(self.path) as fp:
+                self.super_block = read_super_block(fp)
+                self._remove_file_link(fp, parent_dir, new_name, existing_inode_id)
+                write_super_block(fp, self.super_block)
+
+        with open_disk(self.path) as fp:
+            if src_is_file:
+                inode_id = parent_dir.son_files.pop(old_name)
+                parent_dir.son_files[new_name] = inode_id
+            else:
+                inode_id = parent_dir.son_dirs.pop(old_name)
+                parent_dir.son_dirs[new_name] = inode_id
+            self._write_dir(fp, parent_inode, parent_dir)
 
         self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
 
@@ -433,6 +675,8 @@ class FileSystem:
         normalized = self._normalize_path(path)
         if normalized == BASE_NAME:
             raise FileSystemError("cannot remove root directory")
+        if self._is_cwd_or_ancestor(normalized):
+            raise FileSystemError(f"cannot remove current directory or its ancestor: {path}")
 
         parent_inode, parent_dir, name = self._resolve_parent(path)
         self._check_permission(parent_inode, "w")
@@ -446,6 +690,9 @@ class FileSystem:
         inode, dir_block = self._resolve_dir(normalized)
         if not recursive and (dir_block.son_files or dir_block.son_dirs):
             raise FileSystemError(f"directory is not empty: {path}")
+        self._ensure_inode_not_in_use(inode_id)
+        if recursive:
+            self._ensure_dir_tree_not_in_use(dir_block)
 
         with open_disk(self.path) as fp:
             self.super_block = read_super_block(fp)
@@ -474,7 +721,7 @@ class FileSystem:
 
 
     # 以下是一些内部辅助方法：
-    
+
     # 当前用户 ID，如果没有用户登录则返回 root 用户 ID
     def _current_user_id(self) -> int:
         return self.current_user.user_id if self.current_user is not None else ROOT_ID
@@ -488,7 +735,7 @@ class FileSystem:
         if not hasattr(inode, "owner_id"):
             inode.owner_id = getattr(inode, "user_id", ROOT_ID)
         return inode.owner_id
-    
+
     # 获取mode
     def _inode_mode(self, inode: Inode) -> int:
         if not hasattr(inode, "mode"):
@@ -539,7 +786,7 @@ class FileSystem:
     def _require_login(self) -> None:
         if self.current_user is None:
             raise FileSystemError("login required")
-        
+
     # 检查当前用户是否是 root 用户
     def _is_root_user(self) -> bool:
         return self.current_user is not None and self.current_user.user_id == ROOT_ID
@@ -579,11 +826,46 @@ class FileSystem:
         except KeyError as exc:
             raise FileSystemError(f"invalid file descriptor: {fd}") from exc
 
+    # _hold_inode 临时持有一次 inode 引用，并确保异常时也会释放
+    @contextmanager
+    def _hold_inode(self, inode_id: int) -> Iterator[MemoryInode]:
+        try:
+            with self.inode_cache.hold(inode_id) as memory_inode:
+                yield memory_inode
+        except InodeCacheError as exc:
+            raise FileSystemError(str(exc)) from exc
+
+    # _mark_inode_dirty 标记内存 inode 已被修改
+    def _mark_inode_dirty(self, memory_inode: MemoryInode) -> None:
+        try:
+            self.inode_cache.mark_dirty(memory_inode)
+        except InodeCacheError as exc:
+            raise FileSystemError(str(exc)) from exc
+
+    # _ensure_inode_not_in_use 删除前检查 inode 是否仍存在活动引用或访问锁
+    def _ensure_inode_not_in_use(self, inode_id: int) -> None:
+        try:
+            self.inode_cache.ensure_unused(inode_id)
+        except InodeCacheError as exc:
+            raise FileSystemError(str(exc)) from exc
+
+    # _discard_cached_inode 删除磁盘 inode 前移除缓存中的旧副本
+    def _discard_cached_inode(self, inode_id: int) -> None:
+        try:
+            self.inode_cache.discard(inode_id)
+        except InodeCacheError as exc:
+            raise FileSystemError(str(exc)) from exc
+
     # 从磁盘读取指定文件 inode 的内容，返回 bytes
     def _read_file_inode(self, inode_id: int) -> bytes:
-        inode = self._read_inode(inode_id)
+        with self._hold_inode(inode_id) as memory_inode:
+            return self._read_file_memory_inode(memory_inode)
+
+    # 根据内存 inode 读取文件内容
+    def _read_file_memory_inode(self, memory_inode: MemoryInode) -> bytes:
+        inode = memory_inode.inode
         if inode.is_dir:
-            raise FileSystemError(f"inode {inode_id} is a directory")
+            raise FileSystemError(f"inode {inode.inode_id} is a directory")
 
         content = bytearray()
         with open_disk(self.path) as fp:
@@ -595,6 +877,15 @@ class FileSystem:
 
     # 将数据写入指定文件 inode，更新 inode 的直接索引和间接索引，并写回磁盘
     def _write_file_inode(self, inode_id: int, data: bytes | bytearray) -> None:
+        with self._hold_inode(inode_id) as memory_inode:
+            self._write_file_memory_inode(memory_inode, data)
+
+    # 将数据写入内存 inode 指向的文件，并将 inode 标记为脏
+    def _write_file_memory_inode(
+        self,
+        memory_inode: MemoryInode,
+        data: bytes | bytearray,
+    ) -> None:
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("data must be bytes or bytearray")
         data = bytes(data)
@@ -606,9 +897,9 @@ class FileSystem:
 
         with open_disk(self.path) as fp:
             self.super_block = read_super_block(fp)
-            inode = read_inode(fp, inode_id)
+            inode = memory_inode.inode
             if inode.is_dir:
-                raise FileSystemError(f"inode {inode_id} is a directory")
+                raise FileSystemError(f"inode {inode.inode_id} is a directory")
 
             data_block_ids = self._file_data_block_ids(fp, inode)
 
@@ -627,7 +918,8 @@ class FileSystem:
 
             inode.size = len(data)
             inode.direct_blocks_size = len(inode.direct_blocks)
-            write_inode(fp, inode.inode_id, inode)
+            inode.modify_time = time.time()
+            self._mark_inode_dirty(memory_inode)
             write_super_block(fp, self.super_block)
 
     # _alloc_inode_id 从超级块的 inode 位图中分配一个新的 inode id
@@ -646,7 +938,7 @@ class FileSystem:
             raise FileSystemError(f"inode is already free: {inode_id}")
         self.super_block.free_inode_bitmap._set_bit(inode_id, 0)
         self.super_block.free_inode_cnt += 1
-    
+
     # _free_inode_data_blocks 释放 inode 占用的数据块，并清空 inode 的直接索引列表和大小信息
     # 间接索引的释放暂不支持，因为目前还没有实现间接索引
     def _free_inode_data_blocks(self, fp, inode: Inode) -> None:
@@ -659,13 +951,42 @@ class FileSystem:
         inode.indirect_block = None
         inode.size = 0
 
+    def _remove_file_link(
+        self,
+        fp,
+        parent_dir: DirBlock,
+        name: str,
+        inode_id: int,
+        *,
+        total_references: int | None = None,
+        removed_references: int = 1,
+        released_file_inodes: set[int] | None = None,
+    ) -> None:
+        if total_references is None:
+            total_references = self._count_file_references(fp, inode_id)
+
+        should_release_inode = total_references <= removed_references
+        already_released = released_file_inodes is not None and inode_id in released_file_inodes
+
+        if should_release_inode and not already_released:
+            self._ensure_inode_not_in_use(inode_id)
+            with self._hold_inode(inode_id) as memory_inode:
+                self._free_inode_data_blocks(fp, memory_inode.inode)
+            self._discard_cached_inode(inode_id)
+            self._free_inode_id(inode_id)
+            clear_inode_slot(fp, inode_id)
+            if released_file_inodes is not None:
+                released_file_inodes.add(inode_id)
+
+        parent_dir.remove(name, FILE_TYPE)
+
     # _required_block_count 计算存储指定字节数需要的数据块数量
     def _required_block_count(self, byte_count: int) -> int:
         if byte_count == 0:
             return 0
         # 向上取整计算需要的块数
         return (byte_count + BLOCK_SIZE - 1) // BLOCK_SIZE
-    
+
     # 一个文件最多可以使用的数据块数量，受直接索引和间接索引的限制
     def _max_file_block_count(self) -> int:
         return DIRECT_CNT + MAX_INDIRECT_BLOCK_IDS
@@ -713,34 +1034,51 @@ class FileSystem:
         total_link_counts: dict[int, int],
         released_file_inodes: set[int],
     ) -> None:
-        
-        for _name, inode_id in list(dir_block.son_files.items()):
-            if inode_id in released_file_inodes:
-                continue
-            if total_link_counts.get(inode_id, 0) <= subtree_link_counts.get(inode_id, 0):
-                inode = read_inode(fp, inode_id)
-                self._free_inode_data_blocks(fp, inode)
-                self._free_inode_id(inode_id)
-                clear_inode_slot(fp, inode_id)
-                released_file_inodes.add(inode_id)
-
-        for _name, inode_id in list(dir_block.son_dirs.items()):
-            inode = read_inode(fp, inode_id)
-            child_dir = self._read_dir_from_fp(fp, inode)
-            self._remove_dir_children(
+        for name, inode_id in list(dir_block.son_files.items()):
+            self._remove_file_link(
                 fp,
-                child_dir,
-                subtree_link_counts,
-                total_link_counts,
-                released_file_inodes,
+                dir_block,
+                name,
+                inode_id,
+                total_references=total_link_counts.get(inode_id, 1),
+                removed_references=subtree_link_counts.get(inode_id, 1),
+                released_file_inodes=released_file_inodes,
             )
-            self._free_inode_data_blocks(fp, inode)
+
+        for name, inode_id in list(dir_block.son_dirs.items()):
+            with self._hold_inode(inode_id) as memory_inode:
+                child_dir = self._read_dir_from_fp(fp, memory_inode.inode)
+                self._remove_dir_children(
+                    fp,
+                    child_dir,
+                    subtree_link_counts,
+                    total_link_counts,
+                    released_file_inodes,
+                )
+                self._free_inode_data_blocks(fp, memory_inode.inode)
+            self._discard_cached_inode(inode_id)
             self._free_inode_id(inode_id)
             clear_inode_slot(fp, inode_id)
+            dir_block.remove(name, DIR_TYPE)
 
         dir_block.son_files.clear()
         dir_block.son_dirs.clear()
         dir_block.counts = 0
+
+    # _ensure_dir_tree_not_in_use 递归删除前检查整棵子树，避免部分删除
+    def _ensure_dir_tree_not_in_use(self, dir_block: DirBlock) -> None:
+        for inode_id in dir_block.son_files.values():
+            self._ensure_inode_not_in_use(inode_id)
+
+        for inode_id in dir_block.son_dirs.values():
+            self._ensure_inode_not_in_use(inode_id)
+            inode = self._read_inode(inode_id)
+            self._ensure_dir_tree_not_in_use(self._read_dir(inode))
+
+    # _is_cwd_or_ancestor 判断路径是否为 cwd 或 cwd 的祖先目录
+    def _is_cwd_or_ancestor(self, path: str) -> bool:
+        normalized = self._normalize_path(path)
+        return self.cwd_path == normalized or self.cwd_path.startswith(normalized.rstrip("/") + "/")
 
     # _ensure_name_available 检查目录中是否已经存在同名的文件或目录
     def _ensure_name_available(self, dir_block: DirBlock, name: str) -> None:
@@ -836,10 +1174,10 @@ class FileSystem:
         inode = self._read_inode(ROOT_ID)
         return inode, self._read_dir(inode)
 
-    # _read_inode 从磁盘读取指定 inode id 的 Inode 对象
+    # _read_inode 从内存 inode 表获取指定 inode 的当前副本
     def _read_inode(self, inode_id: int) -> Inode:
-        with open_disk(self.path) as fp:
-            return read_inode(fp, inode_id)
+        with self._hold_inode(inode_id) as memory_inode:
+            return memory_inode.inode
 
     # _read_dir 从磁盘读取指定目录 inode 的 DirBlock 对象
     def _read_dir(self, inode: Inode) -> DirBlock:

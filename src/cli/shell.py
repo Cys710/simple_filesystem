@@ -78,6 +78,7 @@ class Shell:
                 line = self._read_command(f"{GREEN}pfs:{self._pwd()}$ {RESET}")
             except (EOFError, KeyboardInterrupt):
                 self._println()
+                self._shutdown_fs()
                 return
 
             should_continue = self.execute(line)
@@ -100,6 +101,7 @@ class Shell:
 
         try:
             if cmd in {"exit", "quit"}:
+                self._shutdown_fs()
                 return False
             if self.fs is not None and self.fs.current_user is None and cmd not in LOGIN_OPTIONAL_COMMANDS:
                 raise FileSystemError("login required")
@@ -109,6 +111,8 @@ class Shell:
                 self._format(args)
             elif cmd == "mount":
                 self._mount(args)
+            elif cmd == "sync":
+                self._sync(args)
             elif cmd == "ls":
                 self._ls(args)
             elif cmd == "mkdir":
@@ -165,6 +169,12 @@ class Shell:
                 self._append(args)
             elif cmd == "fill":
                 self._fill(args)
+            elif cmd == "cp":
+                self._cp(args)
+            elif cmd == "mv":
+                self._mv(args)
+            elif cmd in {"rename", "rname"}:
+                self._rename(args)
             elif cmd == "rm":
                 self._rm(args)
             elif cmd == "rmdir":
@@ -194,6 +204,7 @@ class Shell:
         self._expect_max_args(args, 1, "format [disk_path]")
         if args:
             self.disk_path = Path(args[0])
+        self._shutdown_fs()
         self.fs = FileSystem.format_and_mount(self.disk_path)
         self._println(f"formatted and mounted {self.disk_path}")
 
@@ -206,6 +217,13 @@ class Shell:
             raise FileNotFoundError(str(self.disk_path))
         self.fs = FileSystem.mount(self.disk_path)
         self._println(f"mounted {self.disk_path}")
+
+    # _sync 将内存 inode 表中的脏 inode 主动写回磁盘
+    def _sync(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 0, "sync")
+        self.fs.sync()
+        self._println("synced")
 
     # _ls 列出指定路径下的目录项，默认当前目录，输出格式为 name/（目录）或 name（文件）。
     def _ls(self, args: list[str]) -> None:
@@ -481,6 +499,54 @@ class Shell:
             raise FileSystemError(str(exc)) from exc
         self._println(f"appended {written} bytes to {args[0]}")
 
+    def _cp(self, args: list[str]) -> None:
+        self._require_mount()
+        if len(args) < 2 or len(args) > 3:
+            raise FileSystemError("usage: cp [-f] source destination")
+
+        overwrite = False
+        if args[0] == "-f":
+            overwrite = True
+            args = args[1:]
+
+        if len(args) != 2:
+            raise FileSystemError("usage: cp [-f] source destination")
+
+        self.fs.cp(args[0], args[1], overwrite=overwrite)
+        self._println(f"copied {args[0]} to {args[1]}")
+
+    def _mv(self, args: list[str]) -> None:
+        self._require_mount()
+        if len(args) < 2 or len(args) > 3:
+            raise FileSystemError("usage: mv [-f] source destination")
+
+        overwrite = False
+        if args[0] == "-f":
+            overwrite = True
+            args = args[1:]
+
+        if len(args) != 2:
+            raise FileSystemError("usage: mv [-f] source destination")
+
+        self.fs.mv(args[0], args[1], overwrite=overwrite)
+        self._println(f"moved {args[0]} to {args[1]}")
+
+    def _rename(self, args: list[str]) -> None:
+        self._require_mount()
+        if len(args) < 2 or len(args) > 3:
+            raise FileSystemError("usage: rename [-f] old_name new_name")
+
+        overwrite = False
+        if args[0] == "-f":
+            overwrite = True
+            args = args[1:]
+
+        if len(args) != 2:
+            raise FileSystemError("usage: rename [-f] old_name new_name")
+
+        self.fs.rename(args[0], args[1], overwrite=overwrite)
+        self._println(f"renamed {args[0]} to {args[1]}")
+
     def _rm(self, args: list[str]) -> None:
         self._require_mount()
         self._expect_exact_args(args, 1, "rm file")
@@ -499,6 +565,12 @@ class Shell:
     def _require_mount(self) -> None:
         if self.fs is None:
             raise FileSystemError("file system is not mounted")
+
+    # _shutdown_fs 在切换挂载或退出前关闭 fd 并写回缓存
+    def _shutdown_fs(self) -> None:
+        if self.fs is not None:
+            self.fs.shutdown()
+            self.fs = None
 
     # _pwd 返回当前目录的绝对路径，如果文件系统未挂载则返回 "-"。
     def _pwd(self) -> str:
@@ -577,6 +649,9 @@ class Shell:
         " close fd\n" \
         " append file text\n" \
         " fill file [bytes]\n" \
+        " cp [-f] source destination\n" \
+        " mv [-f] source destination\n" \
+        " rename [-f] old_name new_name\n" \
         " rm file\n" \
         " rmdir [-r] directory\n" \
         " cd path\n" \
@@ -607,6 +682,14 @@ class Shell:
         print(text, end="", file=self.output)
 
     def _execute_capture(self, line: str) -> tuple[bool, str, bool]:
+        try:
+            argv = shlex.split(line)
+        except ValueError:
+            argv = []
+        if argv and argv[0] in {"exit", "quit"}:
+            self._last_command_failed = False
+            return False, "", False
+
         old_output = self.output
         captured = io.StringIO()
         self.output = captured

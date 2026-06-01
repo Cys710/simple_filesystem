@@ -44,6 +44,10 @@ INDIRECT_CNT = 1      # 间接索引数
 # 成组链表法配置
 FREE_BLOCK_CNT = 50   # 一组块的数量
 
+# 内存 inode 表配置
+INODE_HASH_BUCKETS = 128
+MEMORY_INODE_LIMIT = 128
+
 # 根目录ID
 ROOT_ID = -1
 

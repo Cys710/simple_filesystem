@@ -1,1 +1,2 @@
 prompt-toolkit>=3.0,<4.0
+windows-curses>=2.4,<3.0; sys_platform == "win32"
