@@ -144,6 +144,55 @@ class TestVimEditorPersistence(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_read_key_normalizes_escape_arrow_sequence(self):
+        temp_dir, fs = self.make_fs()
+        try:
+            editor = VimEditor(fs, "/note.txt")
+            stdscr = Mock()
+            stdscr.get_wch.side_effect = [
+                "\x1b",
+                "[",
+                "B",
+                curses.error("no input"),
+            ]
+
+            key = editor._read_key(stdscr)
+
+            self.assertEqual(key, curses.KEY_DOWN)
+            stdscr.nodelay.assert_any_call(True)
+            stdscr.nodelay.assert_any_call(False)
+        finally:
+            temp_dir.cleanup()
+
+    def test_read_key_normalizes_windows_special_arrow_sequence(self):
+        temp_dir, fs = self.make_fs()
+        try:
+            editor = VimEditor(fs, "/note.txt")
+            stdscr = Mock()
+            stdscr.get_wch.side_effect = ["\xe0", "H"]
+
+            key = editor._read_key(stdscr)
+
+            self.assertEqual(key, curses.KEY_UP)
+        finally:
+            temp_dir.cleanup()
+
+    def test_mouse_click_moves_cursor(self):
+        temp_dir, fs = self.make_fs()
+        try:
+            editor = VimEditor(fs, "/note.txt")
+            editor.buffer = TextBuffer.from_text("abc\ndefgh")
+            editor.row_offset = 0
+            editor.col_offset = 0
+            editor.text_height = 5
+
+            with patch("cli.editor.curses.getmouse", return_value=(0, 2, 1, 0, getattr(curses, "BUTTON1_CLICKED", 0))):
+                editor._handle_key(curses.KEY_MOUSE)
+
+            self.assertEqual((editor.buffer.cursor_y, editor.buffer.cursor_x), (1, 2))
+        finally:
+            temp_dir.cleanup()
+
     def test_shell_reports_non_interactive_terminal(self):
         temp_dir, fs = self.make_fs()
         try:

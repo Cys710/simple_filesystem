@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import difflib
 import io
 import os
 import re
@@ -15,12 +16,35 @@ from typing import Callable, TextIO
 
 from head import DISK_NAME, GREEN, RESET
 from core.file_system import FileSystem, FileSystemError
-from cli.completion import CommandCompleter
-from cli.editor import VimEditor, VimEditorError
-from cli.monitor import DiskMonitor, DiskMonitorError
+from cli.completion import CommandCompleter, SHELL_COMMANDS
 from utils import INDIRECT_INDEX_TEST_BYTES, append_test_data, logo
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+LOGIN_OPTIONAL_COMMANDS = {
+    "bash",
+    "exit",
+    "quit",
+    "help",
+    "format",
+    "mount",
+    "login",
+}
+
+try:
+    from cli.editor import VimEditor, VimEditorError
+except ImportError:
+    VimEditor = None
+
+    class VimEditorError(Exception):
+        pass
+
+try:
+    from cli.monitor import DiskMonitor, DiskMonitorError
+except ImportError:
+    DiskMonitor = None
+
+    class DiskMonitorError(Exception):
+        pass
 
 # Shell 解析用户输入的命令并调用 FileSystem 的方法实现功能。
 class Shell:
@@ -40,6 +64,8 @@ class Shell:
         self.fs: FileSystem | None = None
         self.completer = CommandCompleter(lambda: self.fs)
         self._prompt_reader = None
+        self._last_command_failed = False
+        self._script_stack: list[str] = []
 
     # run 启动交互式 shell，提示用户输入命令并执行，直到用户退出。
     def run(self) -> None:
@@ -60,7 +86,7 @@ class Shell:
 
     # execute 解析并执行一行命令，返回 False 表示退出 shell。
     def execute(self, line: str) -> bool:
-
+        self._last_command_failed = False
         try:
             argv = shlex.split(line)
         except ValueError as exc:
@@ -75,6 +101,8 @@ class Shell:
         try:
             if cmd in {"exit", "quit"}:
                 return False
+            if self.fs is not None and self.fs.current_user is None and cmd not in LOGIN_OPTIONAL_COMMANDS:
+                raise FileSystemError("login required")
             if cmd == "help":
                 self._help()
             elif cmd == "format":
@@ -109,11 +137,19 @@ class Shell:
                 self._chmod(args)
             elif cmd == "stat":
                 self._stat(args)
+            elif cmd == "tree":
+                self._tree(args)
+            elif cmd == "find":
+                self._find(args)
+            elif cmd == "ln":
+                self._ln(args)
+            elif cmd == "bash":
+                self._bash(args)
             elif cmd == "cat":
                 self._cat(args)
             elif cmd == "vim":
                 self._vim(args)
-            elif cmd == "monitor":
+            elif cmd in {"monitor", "visual", "visualize"}:
                 self._monitor(args)
             elif cmd == "open":
                 self._open(args)
@@ -136,15 +172,20 @@ class Shell:
             elif cmd in {"clear", "cls"}:
                 self._clear(args)
             else:
-                self._println(f"unknown command: {cmd}")
+                self._last_command_failed = True
+                self._handle_unknown_command(cmd)
         except FileSystemError as exc:
-            self._println(f"error: {exc}")
+            self._last_command_failed = True
+            self._println(self._format_command_error(cmd, str(exc)))
         except VimEditorError as exc:
-            self._println(f"error: {exc}")
+            self._last_command_failed = True
+            self._println(self._format_command_error(cmd, str(exc)))
         except DiskMonitorError as exc:
-            self._println(f"error: {exc}")
-        except FileNotFoundError:
-            self._println("error: disk image does not exist; run format first")
+            self._last_command_failed = True
+            self._println(self._format_command_error(cmd, str(exc)))
+        except FileNotFoundError as exc:
+            self._last_command_failed = True
+            self._println(self._format_os_error(cmd, exc))
 
         return True
 
@@ -161,6 +202,8 @@ class Shell:
         self._expect_max_args(args, 1, "mount [disk_path]")
         if args:
             self.disk_path = Path(args[0])
+        if not self.disk_path.exists():
+            raise FileNotFoundError(str(self.disk_path))
         self.fs = FileSystem.mount(self.disk_path)
         self._println(f"mounted {self.disk_path}")
 
@@ -215,6 +258,12 @@ class Shell:
         self._expect_exact_args(args, 1, "login username")
         password = self._read_password("Password: ")
         self.fs.login(args[0], password)
+        home_path = self.fs.current_user.home_path if self.fs.current_user is not None else None
+        if home_path:
+            try:
+                self.fs.cd(home_path)
+            except FileSystemError:
+                pass
         self._println(f"logged in as {self.fs.whoami()}")
 
     # _logout 注销当前用户，参数必须为空。
@@ -223,6 +272,7 @@ class Shell:
         self._expect_exact_args(args, 0, "logout")
         old_user = self.fs.whoami()
         self.fs.logout()
+        self.fs.cd("/")
         self._println(f"logged out {old_user}")
 
     # _whoami 输出当前登录的用户名，参数必须为空。
@@ -274,6 +324,59 @@ class Shell:
             f"owner={info['owner_id']} mode={info['mode']} size={info['size']}"
         )
 
+    def _tree(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_max_args(args, 1, "tree [path]")
+        for line in self.fs.tree(args[0] if args else "."):
+            self._println(line)
+
+    def _find(self, args: list[str]) -> None:
+        self._require_mount()
+        if len(args) == 1:
+            path = "."
+            pattern = args[0]
+        elif len(args) == 2:
+            path, pattern = args
+        else:
+            raise FileSystemError("usage: find [path] pattern")
+
+        for line in self.fs.find(pattern, path):
+            self._println(line)
+
+    def _ln(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 2, "ln source target")
+        self.fs.link(args[0], args[1])
+
+    def _bash(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 1, "bash script.sh")
+        script_path = self._resolve_bash_script_path(args[0])
+        if script_path in self._script_stack:
+            raise FileSystemError(f"recursive script include detected: {script_path}")
+
+        inode, _dir_block = self.fs._resolve_path(script_path)
+        if inode.is_dir:
+            raise FileSystemError(f"is a directory: {script_path}")
+        script_text = self.fs.read_file(script_path).decode("utf-8", errors="replace")
+        commands = self._parse_script_commands(script_path, script_text)
+
+        self._script_stack.append(script_path)
+        try:
+            for start_line, end_line, command in commands:
+                line_ref = self._script_line_ref(script_path, start_line, end_line)
+                self._println(f"[bash:{line_ref}]$ {command}")
+                should_continue, output, failed = self._execute_capture(command)
+                if failed:
+                    self._println(f"bash: {line_ref}")
+                if output:
+                    self._println(output)
+                if not should_continue:
+                    self._println(f"bash: script stopped by exit at {line_ref}")
+                    break
+        finally:
+            self._script_stack.pop()
+
     # _cat 输出指定文件的内容，参数为文件路径。
     def _cat(self, args: list[str]) -> None:
         self._require_mount()
@@ -284,11 +387,15 @@ class Shell:
     def _vim(self, args: list[str]) -> None:
         self._require_mount()
         self._expect_exact_args(args, 1, "vim file")
+        if VimEditor is None:
+            raise FileSystemError("vim is unavailable in this environment")
         VimEditor(self.fs, args[0]).run()
 
     def _monitor(self, args: list[str]) -> None:
         self._require_mount()
         self._expect_exact_args(args, 0, "monitor")
+        if DiskMonitor is None:
+            raise FileSystemError("monitor is unavailable in this environment")
         DiskMonitor(
             self.fs,
             command_executor=self._execute_monitor_command,
@@ -301,7 +408,7 @@ class Shell:
             return f"error: {exc}"
         if not argv:
             return ""
-        if argv[0] in {"format", "mount", "monitor", "vim", "clear", "cls"}:
+        if argv[0] in {"format", "mount", "monitor", "visual", "visualize", "vim", "clear", "cls"}:
             return f"error: {argv[0]} is unavailable inside monitor"
 
         old_output = self.output
@@ -441,10 +548,10 @@ class Shell:
         self._println("commands: \n" \
         " format [disk]\n" \
         " mount [disk]\n" \
+        " login username\n" \
         " ls [path]\n" \
         " mkdir dir_name\n" \
         " touch file_name\n" \
-        " login username\n" \
         " logout\n" \
         " whoami\n" \
         " who\n" \
@@ -454,9 +561,14 @@ class Shell:
         " su username\n" \
         " chmod mode path\n" \
         " stat path\n" \
+        " tree [path]\n" \
+        " find [path] pattern\n" \
+        " ln source target\n" \
+        " bash script.sh\n" \
         " cat file\n" \
         " vim file\n" \
         " monitor\n" \
+        " visual\n" \
         " open file [mode]\n" \
         " read fd [size]\n" \
         " write file text\n" \
@@ -475,7 +587,7 @@ class Shell:
     # _expect_exact_args 检查参数数量是否与预期完全匹配，否则抛出错误并显示用法。
     def _expect_exact_args(self, args: list[str], count: int, usage: str) -> None:
         if len(args) != count:
-            raise FileSystemError(f"usage: {usage}")
+            raise FileSystemError(f"Parameternotmatch: {usage}")
 
     def _expect_min_args(self, args: list[str], count: int, usage: str) -> None:
         if len(args) < count:
@@ -493,6 +605,243 @@ class Shell:
     # _print 输出文本但不换行，参数同 _println。
     def _print(self, text: str = "") -> None:
         print(text, end="", file=self.output)
+
+    def _execute_capture(self, line: str) -> tuple[bool, str, bool]:
+        old_output = self.output
+        captured = io.StringIO()
+        self.output = captured
+        try:
+            should_continue = self.execute(line)
+        finally:
+            self.output = old_output
+        return (
+            should_continue,
+            ANSI_ESCAPE_RE.sub("", captured.getvalue()).strip(),
+            self._last_command_failed,
+        )
+
+    def _resolve_bash_script_path(self, path: str) -> str:
+        if self.fs is None:
+            raise FileSystemError("file system is not mounted")
+        if self._script_stack and not path.startswith("/"):
+            parent_dir = self._script_stack[-1].rsplit("/", 1)[0]
+            if not parent_dir:
+                parent_dir = "/"
+            path = f"{parent_dir}/{path}" if parent_dir != "/" else f"/{path}"
+        return self.fs._normalize_path(path)
+
+    def _parse_script_commands(
+        self,
+        script_path: str,
+        script_text: str,
+    ) -> list[tuple[int, int, str]]:
+        parsed_lines: list[tuple[int, list[str]]] = []
+        for line_no, raw_line in enumerate(script_text.splitlines(), start=1):
+            tokens = self._script_line_tokens(script_path, line_no, raw_line)
+            if tokens:
+                parsed_lines.append((line_no, tokens))
+
+        commands: list[tuple[int, int, str]] = []
+        pending_tokens: list[str] = []
+        start_line: int | None = None
+        end_line: int | None = None
+
+        for index, (line_no, tokens) in enumerate(parsed_lines):
+            if not pending_tokens:
+                pending_tokens = list(tokens)
+                start_line = line_no
+            else:
+                pending_tokens.extend(tokens)
+            end_line = line_no
+
+            status = self._script_command_status(pending_tokens)
+            next_first_token = None
+            if index + 1 < len(parsed_lines):
+                next_first_token = parsed_lines[index + 1][1][0]
+
+            should_finalize = status in {"invalid", "unknown"}
+            if status == "complete" and (
+                next_first_token is None or next_first_token in SHELL_COMMANDS
+            ):
+                should_finalize = True
+
+            if should_finalize:
+                commands.append((start_line, end_line, shlex.join(pending_tokens)))
+                pending_tokens = []
+                start_line = None
+                end_line = None
+
+        if pending_tokens:
+            commands.append((start_line, end_line, shlex.join(pending_tokens)))
+
+        return commands
+
+    def _script_line_tokens(self, script_path: str, line_no: int, raw_line: str) -> list[str]:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            return []
+        try:
+            return shlex.split(raw_line, comments=True)
+        except ValueError as exc:
+            raise FileSystemError(
+                f"invalid script syntax in {script_path}:{line_no}: {exc}"
+            ) from exc
+
+    def _script_command_status(self, tokens: list[str]) -> str:
+        command = tokens[0]
+        arg_count = len(tokens) - 1
+        if command not in SHELL_COMMANDS:
+            return "unknown"
+
+        if command in {
+            "help",
+            "logout",
+            "who",
+            "whoami",
+            "users",
+            "monitor",
+            "visual",
+            "visualize",
+            "pwd",
+            "clear",
+            "cls",
+            "exit",
+            "quit",
+        }:
+            return self._status_for_fixed_range(arg_count, 0, 0)
+        if command in {"format", "mount", "ls", "passwd", "tree"}:
+            return self._status_for_fixed_range(arg_count, 0, 1)
+        if command in {
+            "mkdir",
+            "touch",
+            "cd",
+            "login",
+            "useradd",
+            "su",
+            "stat",
+            "cat",
+            "vim",
+            "rm",
+            "bash",
+        }:
+            return self._status_for_fixed_range(arg_count, 1, 1)
+        if command in {"chmod", "ln"}:
+            return self._status_for_fixed_range(arg_count, 2, 2)
+        if command in {"find", "open", "read", "fill"}:
+            return self._status_for_fixed_range(arg_count, 1, 2)
+        if command == "seek":
+            return self._status_for_fixed_range(arg_count, 2, 3)
+        if command == "rmdir":
+            if arg_count == 0:
+                return "incomplete"
+            if arg_count == 1 and tokens[1] in {"-r", "--recursive"}:
+                return "incomplete"
+            return self._status_for_fixed_range(arg_count, 1, 2)
+        if command in {"write", "append"}:
+            return "complete" if arg_count >= 2 else "incomplete"
+        return "unknown"
+
+    def _status_for_fixed_range(self, arg_count: int, min_args: int, max_args: int) -> str:
+        if arg_count < min_args:
+            return "incomplete"
+        if arg_count > max_args:
+            return "invalid"
+        return "complete"
+
+    def _script_line_ref(self, script_path: str, start_line: int, end_line: int) -> str:
+        if start_line == end_line:
+            return f"{script_path}:{start_line}"
+        return f"{script_path}:{start_line}-{end_line}"
+
+    def _handle_unknown_command(self, cmd: str) -> None:
+        self._println(f"{cmd}: command not found")
+        suggestion = self._suggest_command(cmd)
+        if suggestion is not None:
+            self._println(f"Did you mean '{suggestion}'?")
+
+    def _suggest_command(self, cmd: str) -> str | None:
+        matches = difflib.get_close_matches(cmd, SHELL_COMMANDS, n=1, cutoff=0.55)
+        return matches[0] if matches else None
+
+    def _format_command_error(self, cmd: str, message: str) -> str:
+        if message.startswith("Parameternotmatch: "):
+            return f"{cmd}: {message}"
+        if message.startswith("usage: "):
+            return f"{cmd}: {message}"
+        if message == "login required":
+            return f"{cmd}: login required. Please run 'login <username>' first."
+        if message == "file system is not mounted":
+            return f"{cmd}: no file system mounted. Please run 'mount' or 'format' first."
+        if message == "invalid username or password":
+            return f"{cmd}: authentication failed"
+        if message == "permission denied":
+            return f"{cmd}: permission denied"
+        if message == "operation cancelled":
+            return f"{cmd}: operation cancelled"
+        if message == "passwords do not match":
+            return f"{cmd}: passwords do not match"
+        if message == "password cannot be empty":
+            return f"{cmd}: password cannot be empty"
+        if message == "monitor is unavailable in this environment":
+            return f"{cmd}: monitor is unavailable in this environment"
+        if message.startswith("recursive script include detected: "):
+            return f"{cmd}: recursive script include detected: {message.removeprefix('recursive script include detected: ')}"
+        if message.startswith("invalid script syntax in "):
+            return f"{cmd}: {message}"
+        if message.startswith("path not found: "):
+            return f"{cmd}: no such file or directory: {message.removeprefix('path not found: ')}"
+        if message.startswith("file not found: "):
+            return f"{cmd}: no such file: {message.removeprefix('file not found: ')}"
+        if message.startswith("directory not found: "):
+            return f"{cmd}: no such directory: {message.removeprefix('directory not found: ')}"
+        if message.startswith("user not found: "):
+            return f"{cmd}: user not found: {message.removeprefix('user not found: ')}"
+        if message.startswith("user already exists: "):
+            return f"{cmd}: user already exists: {message.removeprefix('user already exists: ')}"
+        if message.startswith("name already exists: "):
+            return f"{cmd}: file exists: {message.removeprefix('name already exists: ')}"
+        if message.startswith("invalid fd: "):
+            return f"{cmd}: invalid file descriptor: {message.removeprefix('invalid fd: ')}"
+        if message.startswith("invalid file descriptor: "):
+            return f"{cmd}: bad file descriptor: {message.removeprefix('invalid file descriptor: ')}"
+        if message.startswith("file descriptor is not readable: "):
+            return (
+                f"{cmd}: bad file descriptor (not opened for reading): "
+                f"{message.removeprefix('file descriptor is not readable: ')}"
+            )
+        if message.startswith("file descriptor is not writable: "):
+            return (
+                f"{cmd}: bad file descriptor (not opened for writing): "
+                f"{message.removeprefix('file descriptor is not writable: ')}"
+            )
+        if message.startswith("invalid mode: "):
+            return f"{cmd}: invalid mode: {message.removeprefix('invalid mode: ')}"
+        if message.startswith("is a directory: "):
+            return f"{cmd}: is a directory: {message.removeprefix('is a directory: ')}"
+        if message.startswith("not a directory: "):
+            return f"{cmd}: not a directory: {message.removeprefix('not a directory: ')}"
+        if message.startswith("directory is not empty: "):
+            return (
+                f"{cmd}: directory not empty: "
+                f"{message.removeprefix('directory is not empty: ')}"
+            )
+        if message == "cannot remove root directory":
+            return f"{cmd}: cannot remove '/': operation not permitted"
+        if message.startswith("invalid whence: "):
+            return f"{cmd}: invalid whence value: {message.removeprefix('invalid whence: ')}"
+        if message.startswith("read size cannot be less than -1"):
+            return f"{cmd}: invalid read size"
+        return f"{cmd}: {message}"
+
+    def _format_os_error(self, cmd: str, exc: FileNotFoundError) -> str:
+        raw_path = exc.filename or str(self.disk_path)
+        if cmd == "mount":
+            return f"mount: disk image not found: {Path(raw_path)}"
+        if cmd == "bash":
+            return f"bash: script not found: {raw_path}"
+        if cmd == "format":
+            return f"format: target path not found: {Path(raw_path).parent}"
+        return f"{cmd}: no such file or directory: {raw_path}"
 
 def main() -> None:
     Shell().run()

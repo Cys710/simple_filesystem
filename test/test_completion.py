@@ -66,6 +66,21 @@ class TestCommandCompleter(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_completes_tilde_paths_from_user_home(self):
+        temp_dir, fs = self.make_fs()
+        try:
+            fs.login("root", "123456")
+            fs.useradd("alice", "alice-pass")
+            fs.su("alice", "alice-pass")
+            fs.touch("~/note.txt")
+            completer = CommandCompleter(lambda: fs)
+
+            result = completer.complete("cat ~/no")
+
+            self.assertEqual(result.line, "cat ~/note.txt ")
+        finally:
+            temp_dir.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()

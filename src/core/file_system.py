@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 from pathlib import Path
 from typing import Iterable
@@ -232,6 +233,49 @@ class FileSystem:
             "size": inode.size,
         }
 
+    def tree(self, path: str = ".") -> list[str]:
+        inode, dir_block = self._resolve_path(path)
+        normalized = self._normalize_path(path)
+        label = normalized if normalized == BASE_NAME else normalized.rstrip("/")
+        if inode.is_dir:
+            self._check_permission(inode, "r")
+            self._check_permission(inode, "x")
+            lines = [f"{label}/" if label != BASE_NAME else label]
+            lines.extend(self._tree_lines(normalized, dir_block, ""))
+            return lines
+        return [label]
+
+    def find(self, pattern: str, path: str = ".") -> list[str]:
+        inode, dir_block = self._resolve_path(path)
+        if not inode.is_dir:
+            raise FileSystemError(f"not a directory: {path}")
+
+        normalized = self._normalize_path(path)
+        self._check_permission(inode, "r")
+        self._check_permission(inode, "x")
+
+        matches = []
+        self._find_matches(normalized, dir_block, pattern, matches)
+        return matches
+
+    def link(self, source_path: str, target_path: str) -> None:
+        source_inode, _dir_block = self._resolve_path(source_path)
+        if source_inode.is_dir:
+            raise FileSystemError(f"is a directory: {source_path}")
+
+        parent_inode, parent_dir, name = self._resolve_parent(target_path)
+        if not name:
+            raise FileSystemError("link name cannot be empty")
+        self._ensure_name_available(parent_dir, name)
+        self._check_permission(parent_inode, "w")
+        self._check_permission(parent_inode, "x")
+
+        with open_disk(self.path) as fp:
+            parent_dir.add_new_file(name, source_inode.inode_id)
+            self._write_dir(fp, parent_inode, parent_dir)
+
+        self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
+
     # open 打开文件，返回文件描述符
     def open(self, path: str, mode: str = "r") -> int:
 
@@ -373,10 +417,11 @@ class FileSystem:
 
         with open_disk(self.path) as fp:
             self.super_block = read_super_block(fp)
-            inode = read_inode(fp, inode_id)
-            self._free_inode_data_blocks(fp, inode)
-            self._free_inode_id(inode_id)
-            clear_inode_slot(fp, inode_id)
+            if self._count_file_references(fp, inode_id) <= 1:
+                inode = read_inode(fp, inode_id)
+                self._free_inode_data_blocks(fp, inode)
+                self._free_inode_id(inode_id)
+                clear_inode_slot(fp, inode_id)
             parent_dir.remove(name, FILE_TYPE)
             self._write_dir(fp, parent_inode, parent_dir)
             write_super_block(fp, self.super_block)
@@ -406,7 +451,18 @@ class FileSystem:
             self.super_block = read_super_block(fp)
             inode = read_inode(fp, inode.inode_id)
             if recursive:
-                self._remove_dir_children(fp, dir_block)
+                subtree_link_counts = self._collect_subtree_file_links(fp, dir_block)
+                total_link_counts = {
+                    file_inode_id: self._count_file_references(fp, file_inode_id)
+                    for file_inode_id in subtree_link_counts
+                }
+                self._remove_dir_children(
+                    fp,
+                    dir_block,
+                    subtree_link_counts,
+                    total_link_counts,
+                    set(),
+                )
             self._free_inode_data_blocks(fp, inode)
             self._free_inode_id(inode_id)
             clear_inode_slot(fp, inode_id)
@@ -649,20 +705,35 @@ class FileSystem:
             self.super_block.free_up_data_block(fp, old_indirect_block)
 
     # 递归删除目录下的所有子目录和文件，释放它们占用的 inode 和数据块
-    def _remove_dir_children(self, fp, dir_block: DirBlock) -> None:
+    def _remove_dir_children(
+        self,
+        fp,
+        dir_block: DirBlock,
+        subtree_link_counts: dict[int, int],
+        total_link_counts: dict[int, int],
+        released_file_inodes: set[int],
+    ) -> None:
         
         for _name, inode_id in list(dir_block.son_files.items()):
-            inode = read_inode(fp, inode_id)
-            self._free_inode_data_blocks(fp, inode)
-            self._free_inode_id(inode_id)
-            clear_inode_slot(fp, inode_id)
+            if inode_id in released_file_inodes:
+                continue
+            if total_link_counts.get(inode_id, 0) <= subtree_link_counts.get(inode_id, 0):
+                inode = read_inode(fp, inode_id)
+                self._free_inode_data_blocks(fp, inode)
+                self._free_inode_id(inode_id)
+                clear_inode_slot(fp, inode_id)
+                released_file_inodes.add(inode_id)
 
         for _name, inode_id in list(dir_block.son_dirs.items()):
             inode = read_inode(fp, inode_id)
-            child_dir = read_object(fp, DATA_BLOCK_START_ID + inode.direct_blocks[0])
-            if not isinstance(child_dir, DirBlock):
-                raise FileSystemError(f"inode {inode_id} does not point to a DirBlock")
-            self._remove_dir_children(fp, child_dir)
+            child_dir = self._read_dir_from_fp(fp, inode)
+            self._remove_dir_children(
+                fp,
+                child_dir,
+                subtree_link_counts,
+                total_link_counts,
+                released_file_inodes,
+            )
             self._free_inode_data_blocks(fp, inode)
             self._free_inode_id(inode_id)
             clear_inode_slot(fp, inode_id)
@@ -730,6 +801,8 @@ class FileSystem:
         # 当前路径
         if not path or path == ".":
             return self.cwd_path
+        if path.startswith("~"):
+            path = self._expand_home_path(path)
         # 绝对路径 raw
         if path.startswith(BASE_NAME):
             base = BASE_NAME
@@ -744,6 +817,19 @@ class FileSystem:
         if not normalized.startswith(BASE_NAME):
             normalized = BASE_NAME + normalized
         return normalized
+
+    def _expand_home_path(self, path: str) -> str:
+        if path == "~":
+            suffix = ""
+        elif path.startswith("~/"):
+            suffix = path[2:]
+        else:
+            raise FileSystemError(f"invalid path: {path}")
+
+        home_path = self._current_home_path()
+        if not suffix:
+            return home_path
+        return posixpath.join(home_path, suffix)
 
     # _read_root 读取根目录的 inode 和 DirBlock
     def _read_root(self) -> tuple[Inode, DirBlock]:
@@ -763,11 +849,19 @@ class FileSystem:
             raise FileSystemError(f"directory inode {inode.inode_id} has no data block")
 
         with open_disk(self.path) as fp:
-            dir_block = read_object(fp, DATA_BLOCK_START_ID + inode.direct_blocks[0])
+            return self._read_dir_from_fp(fp, inode)
 
+    def _read_dir_from_fp(self, fp, inode: Inode) -> DirBlock:
+        if not isinstance(inode, Inode):
+            raise TypeError("inode must be an Inode")
+        if not inode.is_dir:
+            raise FileSystemError(f"inode {inode.inode_id} is not a directory")
+        if not inode.direct_blocks:
+            raise FileSystemError(f"directory inode {inode.inode_id} has no data block")
+
+        dir_block = read_object(fp, DATA_BLOCK_START_ID + inode.direct_blocks[0])
         if not isinstance(dir_block, DirBlock):
             raise FileSystemError(f"inode {inode.inode_id} does not point to a DirBlock")
-
         return dir_block
 
     # _write_dir 将 DirBlock 对象写回磁盘对应目录 inode 的数据块
@@ -780,3 +874,93 @@ class FileSystem:
     def _refresh_cwd_if_changed(self, inode_id: int, dir_block: DirBlock) -> None:
         if self.cwd_inode.inode_id == inode_id:
             self.cwd_dir = dir_block
+
+    def _current_home_path(self) -> str:
+        if self.current_user is None or not self.current_user.home_path:
+            raise FileSystemError("login required")
+        if self.current_user.name == "root":
+            try:
+                self._resolve_dir(self.current_user.home_path)
+            except FileSystemError:
+                return BASE_NAME
+        return self.current_user.home_path
+
+    def _sorted_dir_entries(self, dir_block: DirBlock) -> list[tuple[str, int]]:
+        entries = [(name, DIR_TYPE) for name in sorted(dir_block.son_dirs)]
+        entries.extend((name, FILE_TYPE) for name in sorted(dir_block.son_files))
+        return entries
+
+    def _tree_lines(self, base_path: str, dir_block: DirBlock, prefix: str) -> list[str]:
+        entries = self._sorted_dir_entries(dir_block)
+        lines = []
+        for index, (name, entry_type) in enumerate(entries):
+            child_path = posixpath.join(base_path, name)
+            is_last = index == len(entries) - 1
+            branch = "`-- " if is_last else "|-- "
+            next_prefix = prefix + ("    " if is_last else "|   ")
+
+            if entry_type == DIR_TYPE:
+                inode = self._read_inode(dir_block.son_dirs[name])
+                line = f"{prefix}{branch}{name}/"
+                if self._can_list_directory(inode):
+                    child_dir = self._read_dir(inode)
+                    lines.append(line)
+                    lines.extend(self._tree_lines(child_path, child_dir, next_prefix))
+                else:
+                    lines.append(f"{line} [permission denied]")
+                continue
+
+            lines.append(f"{prefix}{branch}{name}")
+        return lines
+
+    def _find_matches(
+        self,
+        base_path: str,
+        dir_block: DirBlock,
+        pattern: str,
+        matches: list[str],
+    ) -> None:
+        for name in sorted(dir_block.son_dirs):
+            child_path = posixpath.join(base_path, name)
+            if fnmatch.fnmatch(name, pattern):
+                matches.append(child_path)
+            inode = self._read_inode(dir_block.son_dirs[name])
+            if self._can_list_directory(inode):
+                self._find_matches(child_path, self._read_dir(inode), pattern, matches)
+
+        for name in sorted(dir_block.son_files):
+            if fnmatch.fnmatch(name, pattern):
+                matches.append(posixpath.join(base_path, name))
+
+    def _can_list_directory(self, inode: Inode) -> bool:
+        try:
+            self._check_permission(inode, "r")
+            self._check_permission(inode, "x")
+        except FileSystemError:
+            return False
+        return True
+
+    def _count_file_references(self, fp, inode_id: int) -> int:
+        root_inode = read_inode(fp, ROOT_ID)
+        root_dir = self._read_dir_from_fp(fp, root_inode)
+        return self._count_file_references_in_dir(fp, root_dir, inode_id)
+
+    def _count_file_references_in_dir(self, fp, dir_block: DirBlock, inode_id: int) -> int:
+        count = sum(1 for current_inode_id in dir_block.son_files.values() if current_inode_id == inode_id)
+        for child_inode_id in dir_block.son_dirs.values():
+            child_inode = read_inode(fp, child_inode_id)
+            child_dir = self._read_dir_from_fp(fp, child_inode)
+            count += self._count_file_references_in_dir(fp, child_dir, inode_id)
+        return count
+
+    def _collect_subtree_file_links(self, fp, dir_block: DirBlock) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        for inode_id in dir_block.son_files.values():
+            counts[inode_id] = counts.get(inode_id, 0) + 1
+        for child_inode_id in dir_block.son_dirs.values():
+            child_inode = read_inode(fp, child_inode_id)
+            child_dir = self._read_dir_from_fp(fp, child_inode)
+            child_counts = self._collect_subtree_file_links(fp, child_dir)
+            for inode_id, count in child_counts.items():
+                counts[inode_id] = counts.get(inode_id, 0) + count
+        return counts

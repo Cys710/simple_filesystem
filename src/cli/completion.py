@@ -15,6 +15,7 @@ from core.file_system import FileSystem, FileSystemError
 
 SHELL_COMMANDS = (
     "append",
+    "bash",
     "cat",
     "cd",
     "chmod",
@@ -22,8 +23,10 @@ SHELL_COMMANDS = (
     "close",
     "exit",
     "fill",
+    "find",
     "format",
     "help",
+    "ln",
     "login",
     "logout",
     "ls",
@@ -43,18 +46,23 @@ SHELL_COMMANDS = (
     "touch",
     "useradd",
     "users",
+    "visual",
+    "visualize",
     "vim",
     "who",
     "whoami",
     "write",
+    "tree",
 )
 
 PATH_COMMANDS = {
     "append",
+    "bash",
     "cat",
     "cd",
     "chmod",
     "fill",
+    "ln",
     "ls",
     "mkdir",
     "open",
@@ -62,6 +70,7 @@ PATH_COMMANDS = {
     "rmdir",
     "stat",
     "touch",
+    "tree",
     "vim",
     "write",
 }
@@ -90,6 +99,10 @@ class CommandCompleter:
             return [command for command in self.commands if command.startswith(active)]
 
         command = words[0]
+        if command == "find":
+            if len(words) == 1:
+                return self._path_candidates(active, directories_only=True)
+            return []
         if command not in PATH_COMMANDS:
             return []
         return self._path_candidates(active, directories_only=command in DIRECTORY_ONLY_COMMANDS)
@@ -116,7 +129,14 @@ class CommandCompleter:
         if fs is None:
             return []
 
-        parent_text, name_prefix = posixpath.split(active)
+        if active == "~":
+            parent_text = "~"
+            name_prefix = ""
+        elif active.startswith("~") and not active.startswith("~/"):
+            return []
+        else:
+            parent_text, name_prefix = posixpath.split(active)
+
         lookup_dir = parent_text or "."
         display_parent = parent_text
         if display_parent == "/":

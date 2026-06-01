@@ -15,6 +15,24 @@ NORMAL = "NORMAL"
 INSERT = "INSERT"
 COMMAND = "COMMAND"
 
+ESCAPE_KEY_SEQUENCES = {
+    "\x1b[A": curses.KEY_UP,
+    "\x1b[B": curses.KEY_DOWN,
+    "\x1b[C": curses.KEY_RIGHT,
+    "\x1b[D": curses.KEY_LEFT,
+    "\x1bOA": curses.KEY_UP,
+    "\x1bOB": curses.KEY_DOWN,
+    "\x1bOC": curses.KEY_RIGHT,
+    "\x1bOD": curses.KEY_LEFT,
+}
+
+WINDOWS_SPECIAL_KEY_SEQUENCES = {
+    "H": curses.KEY_UP,
+    "P": curses.KEY_DOWN,
+    "M": curses.KEY_RIGHT,
+    "K": curses.KEY_LEFT,
+}
+
 
 class VimEditorError(Exception):
     pass
@@ -154,6 +172,8 @@ class VimEditor:
         self.row_offset = 0
         self.col_offset = 0
         self.running = True
+        self.text_height = 1
+        self.screen_width = 1
 
     def load(self) -> None:
         try:
@@ -198,13 +218,21 @@ class VimEditor:
             curses.use_default_colors()
         except curses.error:
             pass
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+            curses.mouseinterval(0)
+        except curses.error:
+            pass
 
         while self.running:
             self._draw(stdscr)
-            key = stdscr.get_wch()
+            key = self._read_key(stdscr)
             self._handle_key(key)
 
     def _handle_key(self, key) -> None:
+        if key == curses.KEY_MOUSE:
+            self._handle_mouse_key()
+            return
         if self.mode == INSERT:
             self._handle_insert_key(key)
         elif self.mode == COMMAND:
@@ -302,6 +330,8 @@ class VimEditor:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
         text_height = max(1, height - 2)
+        self.text_height = text_height
+        self.screen_width = width
         self._scroll_to_cursor(text_height, width)
 
         for screen_y in range(text_height):
@@ -356,3 +386,69 @@ class VimEditor:
             stdscr.addnstr(y, x, text, n, attr)
         except curses.error:
             pass
+
+    def _read_key(self, stdscr):
+        key = stdscr.get_wch()
+        if key == curses.KEY_MOUSE:
+            return key
+        if key in ESCAPE_KEY_SEQUENCES:
+            return ESCAPE_KEY_SEQUENCES[key]
+        if key == "\x1b":
+            return self._read_escape_sequence(stdscr)
+        if key in ("\x00", "\xe0"):
+            return self._read_windows_special_key(stdscr, key)
+        return key
+
+    def _read_escape_sequence(self, stdscr):
+        sequence = "\x1b" + self._drain_pending_input(stdscr)
+        return ESCAPE_KEY_SEQUENCES.get(sequence, "\x1b")
+
+    def _read_windows_special_key(self, stdscr, prefix: str):
+        try:
+            next_key = stdscr.get_wch()
+        except curses.error:
+            return prefix
+        if isinstance(next_key, str):
+            return WINDOWS_SPECIAL_KEY_SEQUENCES.get(next_key, prefix + next_key)
+        return next_key
+
+    def _drain_pending_input(self, stdscr, *, limit: int = 8) -> str:
+        chunks: list[str] = []
+        stdscr.nodelay(True)
+        try:
+            for _ in range(limit):
+                try:
+                    next_key = stdscr.get_wch()
+                except curses.error:
+                    break
+                if not isinstance(next_key, str):
+                    break
+                chunks.append(next_key)
+        finally:
+            stdscr.nodelay(False)
+        return "".join(chunks)
+
+    def _handle_mouse_key(self) -> None:
+        try:
+            _device_id, mouse_x, mouse_y, _z, button_state = curses.getmouse()
+        except curses.error:
+            return
+
+        click_mask = 0
+        for name in (
+            "BUTTON1_PRESSED",
+            "BUTTON1_RELEASED",
+            "BUTTON1_CLICKED",
+            "BUTTON1_DOUBLE_CLICKED",
+            "BUTTON1_TRIPLE_CLICKED",
+        ):
+            click_mask |= getattr(curses, name, 0)
+
+        if click_mask and not (button_state & click_mask):
+            return
+        if mouse_y < 0 or mouse_y >= self.text_height:
+            return
+
+        self.buffer.cursor_y = min(max(self.row_offset + mouse_y, 0), len(self.buffer.lines) - 1)
+        line_length = len(self.buffer.lines[self.buffer.cursor_y])
+        self.buffer.cursor_x = min(max(self.col_offset + mouse_x, 0), line_length)
