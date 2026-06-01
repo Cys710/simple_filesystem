@@ -2,16 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.inode_cache import MemoryInode
+
 
 @dataclass
 class OpenFile:
     fd: int
-    inode_id: int
+    memory_inode: MemoryInode
     path: str
     mode: str
     offset: int = 0
     readable: bool = False
     writable: bool = False
+    lock_mode: str = "read"
+
+    @property
+    def inode_id(self) -> int:
+        return self.memory_inode.inode_id
 
 # 解析文件打开模式
 def parse_open_mode(mode: str) -> tuple[bool, bool, bool, bool, int]:

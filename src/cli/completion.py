@@ -44,6 +44,7 @@ SHELL_COMMANDS = (
     "seek",
     "stat",
     "su",
+    "sync",
     "touch",
     "useradd",
     "users",

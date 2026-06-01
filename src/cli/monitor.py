@@ -21,7 +21,8 @@ INODE = "inode"
 GROUP = "group"
 BLOCK = "block"
 FILE = "file"
-VIEWS = [OVERVIEW, INODE, GROUP, BLOCK, FILE]
+CACHE = "cache"
+VIEWS = [OVERVIEW, INODE, GROUP, BLOCK, FILE, CACHE]
 
 
 class DiskMonitorError(Exception):
@@ -40,7 +41,7 @@ class DiskMonitor:
         self.visualizer = DiskVisualizer()
         self.view = OVERVIEW
         self.command = ""
-        self.message = "Ready. Type a file-system command or press 1..4 for details."
+        self.message = "Ready. Type a file-system command or press 1..5 for details."
         self.row_offset = 0
         self.col_offset = 0
         self.running = True
@@ -120,8 +121,8 @@ class DiskMonitor:
             self.running = False
         elif not self.command and key == "q":
             self.running = False
-        elif not self.command and key in {"1", "2", "3", "4"}:
-            self._switch_view({"1": INODE, "2": GROUP, "3": BLOCK, "4": FILE}[key])
+        elif not self.command and key in {"1", "2", "3", "4", "5"}:
+            self._switch_view({"1": INODE, "2": GROUP, "3": BLOCK, "4": FILE, "5": CACHE}[key])
         elif isinstance(key, str) and key.isprintable():
             self.command += key
 
@@ -146,7 +147,7 @@ class DiskMonitor:
             return
         if name == "view":
             if len(args) != 1:
-                self.message = "usage: view overview|inode|group|block|file"
+                self.message = "usage: view overview|inode|group|block|file|cache"
                 return
             aliases = {
                 "overview": OVERVIEW,
@@ -157,6 +158,8 @@ class DiskMonitor:
                 "blocks": BLOCK,
                 "file": FILE,
                 "index": FILE,
+                "cache": CACHE,
+                "memory": CACHE,
             }
             if args[0] not in aliases:
                 self.message = f"unknown view: {args[0]}"
@@ -261,6 +264,10 @@ class DiskMonitor:
             return [self._divider("Disk Data Block Allocation", width - 2)] + (
                 self.visualizer.render_block_map(block_info)
             )
+        if self.view == CACHE:
+            return [self._divider("Memory Inode Hash Table", width - 2)] + (
+                self.visualizer.render_memory_inodes(inspector.memory_inodes())
+            )
         if self.index_path is None:
             return [
                 self._divider("Single File Index", width - 2),
@@ -283,7 +290,7 @@ class DiskMonitor:
         status = (
             f"│ Path: {self.fs.pwd():<22} "
             f"View: {self.view:<10} "
-            "Tab cycle | 1..4 details | Up/Down scroll | q quit"
+            "Tab cycle | 1..5 details | Up/Down scroll | q quit"
         )
         self._addnstr(stdscr, 1, 0, status[: width - 1].ljust(width - 1) + "│", width)
         self._addnstr(stdscr, 2, 0, "├" + "─" * (width - 2) + "┤", width, self._color(1))

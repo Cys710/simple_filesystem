@@ -91,6 +91,25 @@ class FileIndexDebugInfo:
     single_indirect_data_blocks: list[int]
 
 
+@dataclass(frozen=True)
+class MemoryInodeDebugEntry:
+    bucket_id: int
+    inode_id: int
+    kind: str
+    size: int
+    ref_count: int
+    dirty: bool
+    reader_holders: list[int]
+    writer_holder: int | None
+
+
+@dataclass(frozen=True)
+class MemoryInodeDebugInfo:
+    bucket_count: int
+    entry_limit: int
+    entries: list[MemoryInodeDebugEntry]
+
+
 class FileSystemInspector:
     """Collect monitor data without mutating the mounted file system."""
 
@@ -210,6 +229,28 @@ class FileSystemInspector:
             direct_blocks=list(inode.direct_blocks),
             single_indirect_block=inode.indirect_block,
             single_indirect_data_blocks=indirect_ids,
+        )
+
+    def memory_inodes(self) -> MemoryInodeDebugInfo:
+        cache = self.fs.inode_cache
+        entries = [
+            MemoryInodeDebugEntry(
+                bucket_id=cache.bucket_index(memory_inode.inode_id),
+                inode_id=memory_inode.inode_id,
+                kind="DIR" if memory_inode.inode.is_dir else "FILE",
+                size=memory_inode.inode.size,
+                ref_count=memory_inode.ref_count,
+                dirty=memory_inode.dirty,
+                reader_holders=sorted(memory_inode.reader_holders),
+                writer_holder=memory_inode.writer_holder,
+            )
+            for memory_inode in cache.entries.values()
+        ]
+        entries.sort(key=lambda entry: (entry.bucket_id, entry.inode_id))
+        return MemoryInodeDebugInfo(
+            bucket_count=cache.hash_bucket_count,
+            entry_limit=cache.max_entries,
+            entries=entries,
         )
 
     def _inode_entries(self, fp, super_block) -> list[InodeDebugEntry]:

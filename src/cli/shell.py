@@ -52,6 +52,7 @@ class Shell:
                 line = self._read_command(f"{GREEN}pfs:{self._pwd()}$ {RESET}")
             except (EOFError, KeyboardInterrupt):
                 self._println()
+                self._shutdown_fs()
                 return
 
             should_continue = self.execute(line)
@@ -74,6 +75,7 @@ class Shell:
 
         try:
             if cmd in {"exit", "quit"}:
+                self._shutdown_fs()
                 return False
             if cmd == "help":
                 self._help()
@@ -81,6 +83,8 @@ class Shell:
                 self._format(args)
             elif cmd == "mount":
                 self._mount(args)
+            elif cmd == "sync":
+                self._sync(args)
             elif cmd == "ls":
                 self._ls(args)
             elif cmd == "mkdir":
@@ -159,6 +163,7 @@ class Shell:
         self._expect_max_args(args, 1, "format [disk_path]")
         if args:
             self.disk_path = Path(args[0])
+        self._shutdown_fs()
         self.fs = FileSystem.format_and_mount(self.disk_path)
         self._println(f"formatted and mounted {self.disk_path}")
 
@@ -167,8 +172,16 @@ class Shell:
         self._expect_max_args(args, 1, "mount [disk_path]")
         if args:
             self.disk_path = Path(args[0])
+        self._shutdown_fs()
         self.fs = FileSystem.mount(self.disk_path)
         self._println(f"mounted {self.disk_path}")
+
+    # _sync 将内存 inode 表中的脏 inode 主动写回磁盘
+    def _sync(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 0, "sync")
+        self.fs.sync()
+        self._println("synced")
 
     # _ls 列出指定路径下的目录项，默认当前目录，输出格式为 name/（目录）或 name（文件）。
     def _ls(self, args: list[str]) -> None:
@@ -447,6 +460,12 @@ class Shell:
         if self.fs is None:
             raise FileSystemError("file system is not mounted")
 
+    # _shutdown_fs 在切换挂载或退出前关闭 fd 并写回缓存
+    def _shutdown_fs(self) -> None:
+        if self.fs is not None:
+            self.fs.shutdown()
+            self.fs = None
+
     # _pwd 返回当前目录的绝对路径，如果文件系统未挂载则返回 "-"。
     def _pwd(self) -> str:
         return self.fs.pwd() if self.fs is not None else "-"
@@ -495,6 +514,7 @@ class Shell:
         self._println("commands: \n" \
         " format [disk]\n" \
         " mount [disk]\n" \
+        " sync\n" \
         " ls [path]\n" \
         " mkdir dir_name\n" \
         " touch file_name\n" \

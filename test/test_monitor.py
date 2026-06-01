@@ -12,7 +12,7 @@ SRC = os.path.join(PROJECT_ROOT, "src")
 
 sys.path.insert(0, SRC)
 
-from cli.monitor import BLOCK, FILE, GROUP, DiskMonitor, DiskMonitorError
+from cli.monitor import BLOCK, CACHE, FILE, GROUP, DiskMonitor, DiskMonitorError
 from cli.shell import Shell
 from cli.visualizer import DiskVisualizer
 from core.debug_info import FileSystemInspector
@@ -94,6 +94,22 @@ class TestFileSystemInspector(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_memory_inode_view_reports_open_file_locks(self):
+        temp_dir, fs = self.make_fs()
+        try:
+            fs.write_file("/note.txt", "hello")
+            fd = fs.open("/note.txt", "r")
+
+            info = FileSystemInspector(fs).memory_inodes()
+            note_inode = fs.open_file_table[fd].inode_id
+            entry = next(item for item in info.entries if item.inode_id == note_inode)
+
+            self.assertEqual(entry.reader_holders, [fd])
+            self.assertIsNone(entry.writer_holder)
+            self.assertGreaterEqual(entry.ref_count, 1)
+        finally:
+            temp_dir.cleanup()
+
 
 class TestDiskMonitorCommands(unittest.TestCase):
     def make_shell(self):
@@ -119,6 +135,9 @@ class TestDiskMonitorCommands(unittest.TestCase):
             monitor._execute_command("index /note.txt")
             self.assertEqual(monitor.view, FILE)
             self.assertEqual(monitor.index_path, "/note.txt")
+
+            monitor._execute_command("view cache")
+            self.assertEqual(monitor.view, CACHE)
         finally:
             temp_dir.cleanup()
 

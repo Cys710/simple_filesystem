@@ -22,6 +22,7 @@ FMS 是一个用 Python 实现的教学型模拟文件系统。目标是：
 - `src/dataStruct/open_file.py`：打开文件表项和打开模式解析。
 - `src/core/format_disk.py`：创建磁盘镜像、初始化超级块、root 用户、根 inode 和根目录。
 - `src/core/mount.py`：挂载磁盘镜像并读取超级块和根目录。
+- `src/core/inode_cache.py`：运行期间的内存 inode 表，包含 Hash 链、引用计数、脏写回和访问锁。
 - `src/core/file_system.py`：文件系统核心 API。
 - `src/cli/shell.py`：交互式 shell。
 - `src/user.py`：用户模型，当前使用 MD5 保存密码哈希，root 默认密码为 `123456`。
@@ -98,6 +99,26 @@ rmdir
 - 多 fd 独立 offset。
 - 直接块 + 一级间接块。
 - 删除文件和目录时释放 inode 和数据块。
+
+### 内存 inode 表
+
+运行期间使用 `InodeCache` 统一管理 inode 的内存副本：
+
+```text
+MemoryInode
+  inode
+  ref_count
+  dirty
+  hash_prev / hash_next
+  reader_holders
+  writer_holder
+```
+
+内存 inode 使用 `128` 个 Hash 桶，桶编号为 `inode_id % 128`。`iget/iput`
+维护引用计数；脏 inode 在最后一个引用释放、缓存淘汰或执行 `sync` 时写回。
+
+打开文件表项指向 `MemoryInode`。`r` 模式获取共享读锁，包含写能力的模式获取
+独占写锁。删除仍在使用的 inode 会被拒绝。
 
 ### 用户系统
 
@@ -192,6 +213,7 @@ read fd [size]
 write fd text
 seek fd offset [whence]
 close fd
+sync
 rm file
 rmdir [-r] directory
 login username
@@ -250,6 +272,5 @@ write /home/alice/private.txt x  # permission denied
 1. 增加 `cp`、`mv`、`rename`。
 2. 增加更完整的 `stat` 展示，例如创建时间、修改时间、直接块数量。
 3. 增加 `tree`，方便展示目录结构。
-4. 增加 `sync` / `unmount`，为后续缓存层做准备。
+4. 增加 `unmount`，进一步明确挂载生命周期。
 5. 根据课设要求决定是否实现 `/etc/users`，一般当前 `SuperBlock.users` 已足够。
-

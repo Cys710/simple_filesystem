@@ -12,6 +12,7 @@ from core.debug_info import (
     FreeGroupEntry,
     FreeGroupsDebugInfo,
     InodeBitmapDebugInfo,
+    MemoryInodeDebugInfo,
 )
 from head import BLOCK_SIZE, DATA_BLOCK_START_ID, DIRECT_CNT
 
@@ -30,6 +31,30 @@ ROLE_SYMBOL = {
 
 
 class DiskVisualizer:
+    def render_memory_inodes(self, info: MemoryInodeDebugInfo) -> list[str]:
+        lines = [
+            "Hash chains for cached inodes",
+            "",
+            "bucket  inode  type  size(B)  refs  dirty  readers  writer",
+            "------  -----  ----  -------  ----  -----  -------  ------",
+        ]
+        for entry in info.entries:
+            readers = ",".join(str(fd) for fd in entry.reader_holders) or "-"
+            writer = str(entry.writer_holder) if entry.writer_holder is not None else "-"
+            lines.append(
+                f"{entry.bucket_id:>6}  {entry.inode_id:>5}  {entry.kind:<4}  "
+                f"{entry.size:>7}  {entry.ref_count:>4}  "
+                f"{'yes' if entry.dirty else 'no':<5}  {readers:<7}  {writer}"
+            )
+        if not info.entries:
+            lines.append("[ empty ]")
+        lines.extend([
+            "",
+            f"Cached inodes: {len(info.entries)} / {info.entry_limit}",
+            f"Hash buckets: {info.bucket_count}",
+        ])
+        return lines
+
     def render_inode_bitmap(
         self,
         info: InodeBitmapDebugInfo,
