@@ -1,0 +1,358 @@
+"""
+    curses based full-screen editor used by the shell's vim command.
+"""
+
+from __future__ import annotations
+
+import curses
+import sys
+from dataclasses import dataclass
+
+from core.file_system import FileSystem, FileSystemError
+
+
+NORMAL = "NORMAL"
+INSERT = "INSERT"
+COMMAND = "COMMAND"
+
+
+class VimEditorError(Exception):
+    pass
+
+
+@dataclass
+class TextBuffer:
+    lines: list[str]
+    cursor_y: int = 0
+    cursor_x: int = 0
+    modified: bool = False
+
+    @classmethod
+    def from_text(cls, text: str) -> "TextBuffer":
+        lines = text.split("\n")
+        if not lines:
+            lines = [""]
+        return cls(lines=lines)
+
+    def to_text(self) -> str:
+        return "\n".join(self.lines)
+
+    @property
+    def current_line(self) -> str:
+        return self.lines[self.cursor_y]
+
+    def clamp_cursor(self) -> None:
+        self.cursor_y = min(max(self.cursor_y, 0), len(self.lines) - 1)
+        self.cursor_x = min(max(self.cursor_x, 0), len(self.current_line))
+
+    def move_left(self) -> None:
+        if self.cursor_x > 0:
+            self.cursor_x -= 1
+        elif self.cursor_y > 0:
+            self.cursor_y -= 1
+            self.cursor_x = len(self.current_line)
+
+    def move_right(self) -> None:
+        if self.cursor_x < len(self.current_line):
+            self.cursor_x += 1
+        elif self.cursor_y < len(self.lines) - 1:
+            self.cursor_y += 1
+            self.cursor_x = 0
+
+    def move_up(self) -> None:
+        if self.cursor_y > 0:
+            self.cursor_y -= 1
+            self.clamp_cursor()
+
+    def move_down(self) -> None:
+        if self.cursor_y < len(self.lines) - 1:
+            self.cursor_y += 1
+            self.clamp_cursor()
+
+    def insert_char(self, char: str) -> None:
+        line = self.current_line
+        self.lines[self.cursor_y] = line[: self.cursor_x] + char + line[self.cursor_x :]
+        self.cursor_x += len(char)
+        self.modified = True
+
+    def insert_newline(self) -> None:
+        line = self.current_line
+        before = line[: self.cursor_x]
+        after = line[self.cursor_x :]
+        self.lines[self.cursor_y] = before
+        self.lines.insert(self.cursor_y + 1, after)
+        self.cursor_y += 1
+        self.cursor_x = 0
+        self.modified = True
+
+    def open_line_below(self) -> None:
+        self.cursor_y += 1
+        self.lines.insert(self.cursor_y, "")
+        self.cursor_x = 0
+        self.modified = True
+
+    def open_line_above(self) -> None:
+        self.lines.insert(self.cursor_y, "")
+        self.cursor_x = 0
+        self.modified = True
+
+    def backspace(self) -> None:
+        if self.cursor_x > 0:
+            line = self.current_line
+            self.lines[self.cursor_y] = line[: self.cursor_x - 1] + line[self.cursor_x :]
+            self.cursor_x -= 1
+            self.modified = True
+            return
+
+        if self.cursor_y == 0:
+            return
+
+        previous_len = len(self.lines[self.cursor_y - 1])
+        self.lines[self.cursor_y - 1] += self.current_line
+        del self.lines[self.cursor_y]
+        self.cursor_y -= 1
+        self.cursor_x = previous_len
+        self.modified = True
+
+    def delete_char(self) -> None:
+        line = self.current_line
+        if self.cursor_x < len(line):
+            self.lines[self.cursor_y] = line[: self.cursor_x] + line[self.cursor_x + 1 :]
+            self.modified = True
+            return
+
+        if self.cursor_y < len(self.lines) - 1:
+            self.lines[self.cursor_y] += self.lines[self.cursor_y + 1]
+            del self.lines[self.cursor_y + 1]
+            self.modified = True
+
+    def delete_line(self) -> None:
+        if len(self.lines) == 1:
+            self.lines[0] = ""
+            self.cursor_x = 0
+        else:
+            del self.lines[self.cursor_y]
+            self.clamp_cursor()
+        self.modified = True
+
+    def goto_line(self, line_number: int) -> None:
+        if line_number < 1:
+            line_number = 1
+        self.cursor_y = min(line_number - 1, len(self.lines) - 1)
+        self.clamp_cursor()
+
+
+class VimEditor:
+    def __init__(self, fs: FileSystem, path: str):
+        self.fs = fs
+        self.path = path
+        self.buffer = TextBuffer.from_text("")
+        self.file_exists = True
+        self.mode = NORMAL
+        self.command = ""
+        self.message = ""
+        self.row_offset = 0
+        self.col_offset = 0
+        self.running = True
+
+    def load(self) -> None:
+        try:
+            data = self.fs.read_file(self.path)
+        except FileSystemError as exc:
+            if "path not found" not in str(exc) and "file not found" not in str(exc):
+                raise
+            self.file_exists = False
+            self.buffer = TextBuffer.from_text("")
+            self.message = f'"{self.path}" [New File]'
+            return
+
+        text = data.decode("utf-8", errors="replace")
+        self.file_exists = True
+        self.buffer = TextBuffer.from_text(text)
+        self.buffer.modified = False
+        self.message = f'"{self.path}" {len(data)} bytes'
+
+    def save(self) -> None:
+        if not self.file_exists:
+            self.fs.touch(self.path)
+            self.file_exists = True
+
+        text = self.buffer.to_text()
+        written = self.fs.write_file(self.path, text)
+        self.buffer.modified = False
+        self.message = f'"{self.path}" written {written} bytes'
+
+    def run(self) -> None:
+        self.load()
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise VimEditorError("vim requires an interactive terminal")
+        curses.wrapper(self._run_screen)
+
+    def _run_screen(self, stdscr) -> None:
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        stdscr.keypad(True)
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+
+        while self.running:
+            self._draw(stdscr)
+            key = stdscr.get_wch()
+            self._handle_key(key)
+
+    def _handle_key(self, key) -> None:
+        if self.mode == INSERT:
+            self._handle_insert_key(key)
+        elif self.mode == COMMAND:
+            self._handle_command_key(key)
+        else:
+            self._handle_normal_key(key)
+
+    def _handle_normal_key(self, key) -> None:
+        if key in (curses.KEY_LEFT, "h"):
+            self.buffer.move_left()
+        elif key in (curses.KEY_RIGHT, "l"):
+            self.buffer.move_right()
+        elif key in (curses.KEY_UP, "k"):
+            self.buffer.move_up()
+        elif key in (curses.KEY_DOWN, "j"):
+            self.buffer.move_down()
+        elif key == "i":
+            self.mode = INSERT
+            self.message = "-- INSERT --"
+        elif key == "a":
+            self.buffer.move_right()
+            self.mode = INSERT
+            self.message = "-- INSERT --"
+        elif key == "o":
+            self.buffer.open_line_below()
+            self.mode = INSERT
+            self.message = "-- INSERT --"
+        elif key == "O":
+            self.buffer.open_line_above()
+            self.mode = INSERT
+            self.message = "-- INSERT --"
+        elif key == "x":
+            self.buffer.delete_char()
+        elif key == "d":
+            self.buffer.delete_line()
+        elif key == ":":
+            self.mode = COMMAND
+            self.command = ""
+        elif key == "\x13":
+            self.save()
+
+    def _handle_insert_key(self, key) -> None:
+        if key == "\x1b":
+            self.mode = NORMAL
+            self.message = ""
+        elif key in (curses.KEY_LEFT,):
+            self.buffer.move_left()
+        elif key in (curses.KEY_RIGHT,):
+            self.buffer.move_right()
+        elif key in (curses.KEY_UP,):
+            self.buffer.move_up()
+        elif key in (curses.KEY_DOWN,):
+            self.buffer.move_down()
+        elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
+            self.buffer.backspace()
+        elif key in ("\n", "\r"):
+            self.buffer.insert_newline()
+        elif isinstance(key, str) and key.isprintable():
+            self.buffer.insert_char(key)
+
+    def _handle_command_key(self, key) -> None:
+        if key == "\x1b":
+            self.mode = NORMAL
+            self.command = ""
+            self.message = ""
+        elif key in (curses.KEY_BACKSPACE, "\b", "\x7f"):
+            self.command = self.command[:-1]
+        elif key in ("\n", "\r"):
+            self._execute_command(self.command.strip())
+            self.command = ""
+            if self.running:
+                self.mode = NORMAL
+        elif isinstance(key, str) and key.isprintable():
+            self.command += key
+
+    def _execute_command(self, command: str) -> None:
+        if command == "w":
+            self.save()
+        elif command in {"q", "quit"}:
+            if self.buffer.modified:
+                self.message = "No write since last change (add ! to override)"
+            else:
+                self.running = False
+        elif command in {"q!", "quit!"}:
+            self.running = False
+        elif command in {"wq", "x"}:
+            self.save()
+            self.running = False
+        elif command.isdigit():
+            self.buffer.goto_line(int(command))
+        else:
+            self.message = f"Not an editor command: {command}"
+
+    def _draw(self, stdscr) -> None:
+        stdscr.erase()
+        height, width = stdscr.getmaxyx()
+        text_height = max(1, height - 2)
+        self._scroll_to_cursor(text_height, width)
+
+        for screen_y in range(text_height):
+            line_index = self.row_offset + screen_y
+            if line_index < len(self.buffer.lines):
+                line = self.buffer.lines[line_index]
+                visible = line[self.col_offset : self.col_offset + width]
+                self._addnstr(stdscr, screen_y, 0, visible, width)
+            else:
+                self._addnstr(stdscr, screen_y, 0, "~", width)
+
+        status_y = max(0, height - 2)
+        command_y = max(0, height - 1)
+        self._draw_status(stdscr, status_y, width)
+        self._draw_command_line(stdscr, command_y, width)
+
+        cursor_y = self.buffer.cursor_y - self.row_offset
+        cursor_x = self.buffer.cursor_x - self.col_offset
+        cursor_y = min(max(cursor_y, 0), max(0, text_height - 1))
+        cursor_x = min(max(cursor_x, 0), max(0, width - 1))
+        stdscr.move(cursor_y, cursor_x)
+        stdscr.refresh()
+
+    def _scroll_to_cursor(self, text_height: int, width: int) -> None:
+        if self.buffer.cursor_y < self.row_offset:
+            self.row_offset = self.buffer.cursor_y
+        elif self.buffer.cursor_y >= self.row_offset + text_height:
+            self.row_offset = self.buffer.cursor_y - text_height + 1
+
+        if self.buffer.cursor_x < self.col_offset:
+            self.col_offset = self.buffer.cursor_x
+        elif self.buffer.cursor_x >= self.col_offset + width:
+            self.col_offset = self.buffer.cursor_x - width + 1
+
+    def _draw_status(self, stdscr, y: int, width: int) -> None:
+        dirty = "[+]" if self.buffer.modified else ""
+        left = f" {self.mode} {dirty} {self.path}"
+        right = f"Ln {self.buffer.cursor_y + 1}, Col {self.buffer.cursor_x + 1} "
+        gap = max(1, width - len(left) - len(right))
+        status = (left + " " * gap + right)[:width]
+        self._addnstr(stdscr, y, 0, status.ljust(width), width, curses.A_REVERSE)
+
+    def _draw_command_line(self, stdscr, y: int, width: int) -> None:
+        if self.mode == COMMAND:
+            text = ":" + self.command
+        else:
+            text = self.message
+        self._addnstr(stdscr, y, 0, text.ljust(width), width)
+
+    def _addnstr(self, stdscr, y: int, x: int, text: str, n: int, attr: int = 0) -> None:
+        try:
+            stdscr.addnstr(y, x, text, n, attr)
+        except curses.error:
+            pass

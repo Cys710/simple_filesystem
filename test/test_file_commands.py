@@ -12,6 +12,7 @@ sys.path.insert(0, SRC)
 from head import BLOCK_SIZE, DIRECT_CNT
 from storage.object_io import pack_object
 from core.file_system import FileSystem, FileSystemError, MAX_INDIRECT_BLOCK_IDS
+from utils import INDIRECT_INDEX_TEST_BYTES, append_test_data
 
 
 class TestFileCommands(unittest.TestCase):
@@ -57,6 +58,25 @@ class TestFileCommands(unittest.TestCase):
     def test_indirect_capacity_is_conservative_for_object_io(self):
         self.assertGreaterEqual(MAX_INDIRECT_BLOCK_IDS, 1)
         pack_object(list(range(MAX_INDIRECT_BLOCK_IDS)))
+
+    def test_append_test_data_crosses_single_indirect_boundary(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            written = append_test_data(fs, "/demo.bin")
+
+            inode, _dir_block = fs._resolve_path("/demo.bin")
+            self.assertEqual(written, INDIRECT_INDEX_TEST_BYTES)
+            self.assertEqual(inode.size, DIRECT_CNT * BLOCK_SIZE)
+            self.assertEqual(len(inode.direct_blocks), DIRECT_CNT)
+            self.assertIsNone(inode.indirect_block)
+
+            append_test_data(fs, "/demo.bin", 1)
+
+            inode, _dir_block = fs._resolve_path("/demo.bin")
+            self.assertEqual(inode.size, DIRECT_CNT * BLOCK_SIZE + 1)
+            self.assertIsNotNone(inode.indirect_block)
+        finally:
+            temp_dir.cleanup()
 
     def test_rm_removes_file_and_releases_inode(self):
         temp_dir, _disk_path, fs = self.make_fs()

@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import io
 import os
+import re
 import shlex
 from getpass import getpass
 from pathlib import Path
@@ -13,7 +15,12 @@ from typing import Callable, TextIO
 
 from head import DISK_NAME, GREEN, RESET
 from core.file_system import FileSystem, FileSystemError
-from utils import logo
+from cli.completion import CommandCompleter
+from cli.editor import VimEditor, VimEditorError
+from cli.monitor import DiskMonitor, DiskMonitorError
+from utils import INDIRECT_INDEX_TEST_BYTES, append_test_data, logo
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 # Shell 解析用户输入的命令并调用 FileSystem 的方法实现功能。
 class Shell:
@@ -31,9 +38,12 @@ class Shell:
         self.password_func = password_func
         self.output = output
         self.fs: FileSystem | None = None
+        self.completer = CommandCompleter(lambda: self.fs)
+        self._readline_matches: list[str] = []
 
     # run 启动交互式 shell，提示用户输入命令并执行，直到用户退出。
     def run(self) -> None:
+        self._configure_readline()
         logo()
         self._println(f"disk: {self.disk_path}")
         self._println("type 'format' to create a fresh file system or 'mount' to load one")
@@ -103,6 +113,10 @@ class Shell:
                 self._stat(args)
             elif cmd == "cat":
                 self._cat(args)
+            elif cmd == "vim":
+                self._vim(args)
+            elif cmd == "monitor":
+                self._monitor(args)
             elif cmd == "open":
                 self._open(args)
             elif cmd == "read":
@@ -115,6 +129,8 @@ class Shell:
                 self._close(args)
             elif cmd == "append":
                 self._append(args)
+            elif cmd == "fill":
+                self._fill(args)
             elif cmd == "rm":
                 self._rm(args)
             elif cmd == "rmdir":
@@ -124,6 +140,10 @@ class Shell:
             else:
                 self._println(f"unknown command: {cmd}")
         except FileSystemError as exc:
+            self._println(f"error: {exc}")
+        except VimEditorError as exc:
+            self._println(f"error: {exc}")
+        except DiskMonitorError as exc:
             self._println(f"error: {exc}")
         except FileNotFoundError:
             self._println("error: disk image does not exist; run format first")
@@ -263,6 +283,41 @@ class Shell:
         data = self.fs.read_file(args[0])
         self._println(data.decode("utf-8", errors="replace"))
 
+    def _vim(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 1, "vim file")
+        VimEditor(self.fs, args[0]).run()
+
+    def _monitor(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 0, "monitor")
+        DiskMonitor(
+            self.fs,
+            command_executor=self._execute_monitor_command,
+        ).run()
+
+    def _execute_monitor_command(self, command: str) -> str:
+        try:
+            argv = shlex.split(command)
+        except ValueError as exc:
+            return f"error: {exc}"
+        if not argv:
+            return ""
+        if argv[0] in {"format", "mount", "monitor", "vim", "clear", "cls"}:
+            return f"error: {argv[0]} is unavailable inside monitor"
+
+        old_output = self.output
+        captured = io.StringIO()
+        self.output = captured
+        try:
+            should_continue = self.execute(command)
+        finally:
+            self.output = old_output
+
+        if not should_continue:
+            return "Press q on an empty command line to leave monitor."
+        return ANSI_ESCAPE_RE.sub("", captured.getvalue()).strip()
+
     # _open 打开指定文件并返回文件描述符，参数为文件路径和可选的打开模式（默认为 "r"）。
     def _open(self, args: list[str]) -> None:
         self._require_mount()
@@ -309,6 +364,17 @@ class Shell:
         self._require_mount()
         self._expect_min_args(args, 2, "append file text")
         self.fs.write_file(args[0], " ".join(args[1:]), append=True)
+
+    def _fill(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_min_args(args, 1, "fill file [bytes]")
+        self._expect_max_args(args, 2, "fill file [bytes]")
+        try:
+            byte_count = int(args[1]) if len(args) == 2 else INDIRECT_INDEX_TEST_BYTES
+            written = append_test_data(self.fs, args[0], byte_count)
+        except ValueError as exc:
+            raise FileSystemError(str(exc)) from exc
+        self._println(f"appended {written} bytes to {args[0]}")
 
     def _rm(self, args: list[str]) -> None:
         self._require_mount()
@@ -358,6 +424,30 @@ class Shell:
             raise FileSystemError("password cannot be empty")
         return password
 
+    def _configure_readline(self) -> None:
+        if self.input_func is not input:
+            return
+        try:
+            import readline
+        except ImportError:
+            return
+
+        readline.set_completer(self._readline_complete)
+        readline.set_completer_delims(" \t\n")
+        readline.parse_and_bind("tab: complete")
+
+    def _readline_complete(self, _text: str, state: int) -> str | None:
+        try:
+            import readline
+        except ImportError:
+            return None
+
+        if state == 0:
+            self._readline_matches = self.completer.candidates(readline.get_line_buffer())
+        if state >= len(self._readline_matches):
+            return None
+        return self._readline_matches[state]
+
     # _help 输出可用命令的帮助信息。
     def _help(self) -> None:
         self._println("commands: \n" \
@@ -377,6 +467,8 @@ class Shell:
         " chmod mode path\n" \
         " stat path\n" \
         " cat file\n" \
+        " vim file\n" \
+        " monitor\n" \
         " open file [mode]\n" \
         " read fd [size]\n" \
         " write file text\n" \
@@ -384,6 +476,7 @@ class Shell:
         " seek fd offset [whence]\n" \
         " close fd\n" \
         " append file text\n" \
+        " fill file [bytes]\n" \
         " rm file\n" \
         " rmdir [-r] directory\n" \
         " cd path\n" \
