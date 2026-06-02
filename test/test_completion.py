@@ -28,6 +28,14 @@ class TestCommandCompleter(unittest.TestCase):
         self.assertEqual(result.line, "monitor ")
         self.assertEqual(result.candidates, ["monitor"])
 
+    def test_completes_gui_command_name(self):
+        completer = CommandCompleter(lambda: None)
+
+        result = completer.complete("gu")
+
+        self.assertEqual(result.line, "gui ")
+        self.assertEqual(result.candidates, ["gui"])
+
     def test_completes_paths_from_current_directory(self):
         temp_dir, fs = self.make_fs()
         try:

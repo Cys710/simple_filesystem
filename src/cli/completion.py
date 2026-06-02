@@ -26,6 +26,7 @@ SHELL_COMMANDS = (
     "fill",
     "find",
     "format",
+    "gui",
     "help",
     "ln",
     "login",

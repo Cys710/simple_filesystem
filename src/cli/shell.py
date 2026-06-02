@@ -46,6 +46,14 @@ except ImportError:
     class DiskMonitorError(Exception):
         pass
 
+try:
+    from cli.gui_mode import FileSystemGui, FileSystemGuiError
+except ImportError:
+    FileSystemGui = None
+
+    class FileSystemGuiError(Exception):
+        pass
+
 # Shell 解析用户输入的命令并调用 FileSystem 的方法实现功能。
 class Shell:
 
@@ -155,6 +163,8 @@ class Shell:
                 self._vim(args)
             elif cmd in {"monitor", "visual", "visualize"}:
                 self._monitor(args)
+            elif cmd == "gui":
+                self._gui(args)
             elif cmd == "open":
                 self._open(args)
             elif cmd == "read":
@@ -191,6 +201,9 @@ class Shell:
             self._last_command_failed = True
             self._println(self._format_command_error(cmd, str(exc)))
         except DiskMonitorError as exc:
+            self._last_command_failed = True
+            self._println(self._format_command_error(cmd, str(exc)))
+        except FileSystemGuiError as exc:
             self._last_command_failed = True
             self._println(self._format_command_error(cmd, str(exc)))
         except FileNotFoundError as exc:
@@ -419,6 +432,21 @@ class Shell:
             command_executor=self._execute_monitor_command,
         ).run()
 
+    def _gui(self, args: list[str]) -> None:
+        self._require_mount()
+        self._expect_exact_args(args, 0, "gui")
+        if self.fs.current_user is None:
+            raise FileSystemError("login required")
+        if FileSystemGui is None:
+            raise FileSystemError("gui is unavailable in this environment")
+        FileSystemGui(
+            lambda: self.fs,
+            self._execute_gui_command,
+            disk_path_getter=lambda: self.disk_path,
+            command_logger=self._log_gui_command,
+            error_formatter=self._format_command_error,
+        ).run()
+
     def _execute_monitor_command(self, command: str) -> str:
         try:
             argv = shlex.split(command)
@@ -426,7 +454,7 @@ class Shell:
             return f"error: {exc}"
         if not argv:
             return ""
-        if argv[0] in {"format", "mount", "monitor", "visual", "visualize", "vim", "clear", "cls"}:
+        if argv[0] in {"format", "mount", "monitor", "visual", "visualize", "gui", "vim", "clear", "cls"}:
             return f"error: {argv[0]} is unavailable inside monitor"
 
         old_output = self.output
@@ -440,6 +468,27 @@ class Shell:
         if not should_continue:
             return "Press q on an empty command line to leave monitor."
         return ANSI_ESCAPE_RE.sub("", captured.getvalue()).strip()
+
+    def _execute_gui_command(self, command: str) -> tuple[bool, str]:
+        try:
+            argv = shlex.split(command)
+        except ValueError as exc:
+            return False, f"error: {exc}"
+        if not argv:
+            return True, ""
+        if argv[0] in {"gui", "monitor", "visual", "visualize", "vim", "clear", "cls", "exit", "quit"}:
+            return False, f"error: {argv[0]} is unavailable inside gui"
+
+        self._log_gui_command(command)
+        should_continue, output, failed = self._execute_capture(command)
+        if output:
+            self._println(output)
+        if not should_continue:
+            return False, "Close the graphical window to leave gui mode."
+        return not failed, output
+
+    def _log_gui_command(self, command: str) -> None:
+        self._println(f"[gui]$ {command}")
 
     # _open 打开指定文件并返回文件描述符，参数为文件路径和可选的打开模式（默认为 "r"）。
     def _open(self, args: list[str]) -> None:
@@ -641,6 +690,7 @@ class Shell:
         " vim file\n" \
         " monitor\n" \
         " visual\n" \
+        " gui\n" \
         " open file [mode]\n" \
         " read fd [size]\n" \
         " write file text\n" \
@@ -785,6 +835,7 @@ class Shell:
             "monitor",
             "visual",
             "visualize",
+            "gui",
             "pwd",
             "clear",
             "cls",
@@ -867,6 +918,8 @@ class Shell:
             return f"{cmd}: password cannot be empty"
         if message == "monitor is unavailable in this environment":
             return f"{cmd}: monitor is unavailable in this environment"
+        if message == "gui is unavailable in this environment":
+            return f"{cmd}: gui is unavailable in this environment"
         if message.startswith("recursive script include detected: "):
             return f"{cmd}: recursive script include detected: {message.removeprefix('recursive script include detected: ')}"
         if message.startswith("invalid script syntax in "):
