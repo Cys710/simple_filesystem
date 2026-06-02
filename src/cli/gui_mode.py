@@ -1,32 +1,49 @@
 # -*- coding: utf-8 -*-
 """
-Tkinter graphical mode for the simulated file system.
+Qt graphical mode for the simulated file system.
 
-The GUI is intentionally a thin layer: most file actions are translated back
-into shell commands, so permissions, login state, path handling and errors stay
-consistent with command-line mode.
+The GUI is a thin desktop shell around existing commands. It intentionally
+reuses FileSystem and Shell operations so permissions, paths, users and error
+messages stay consistent with command-line mode.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import os
 import posixpath
 import shlex
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, simpledialog, ttk
-except ImportError as exc:  # pragma: no cover - depends on local Python install
-    raise ImportError("tkinter is required for gui mode") from exc
+    from PySide6 import QtCore, QtGui, QtWidgets
+except ImportError as exc:  # pragma: no cover - depends on local environment
+    QtCore = None
+    QtGui = None
+    QtWidgets = None
+    QT_IMPORT_ERROR = str(exc)
+else:
+    QT_IMPORT_ERROR = ""
 
 from core.file_system import FileSystem, FileSystemError
 from head import DIR_TYPE, FILE_TYPE
 
 
 CommandExecutor = Callable[[str], tuple[bool, str]]
+FIGURE_DIR = Path(__file__).resolve().parents[1] / "figure"
+ACTION_ICON_FILES = {
+    "新建文件夹": "新建文件夹.svg",
+    "新建文件": "新建文件.svg",
+    "打开": "4打开文件.svg",
+    "编辑": "编辑.svg",
+    "删除": "删除.svg",
+    "属性": "属性.svg",
+    "上一级": "上一级.svg",
+    "刷新": "刷新.svg",
+}
 
 
 @dataclass(frozen=True)
@@ -56,135 +73,149 @@ class FileSystemGui:
         self.command_logger = command_logger
         self.error_formatter = error_formatter
         self.current_path = "/"
-        self.root: tk.Tk | None = None
-        self.path_var: tk.StringVar | None = None
-        self.user_var: tk.StringVar | None = None
-        self.status_var: tk.StringVar | None = None
-        self.search_var: tk.StringVar | None = None
-        self.tree: ttk.Treeview | None = None
-        self.entries: ttk.Treeview | None = None
-        self._tree_paths: dict[str, str] = {}
-        self._entry_paths: dict[str, str] = {}
-        self._path_types: dict[str, int] = {}
-        self._images: dict[str, tk.PhotoImage] = {}
-        self._rename_editor: ttk.Entry | None = None
-        self._user_menu: tk.Menu | None = None
-        self._useradd_menu_index: int | None = None
         self._search_mode = False
+        self._tree_paths: dict[object, str] = {}
+        self._entry_paths: dict[object, str] = {}
+        self._path_types: dict[str, int] = {}
+        self._renaming_path: str | None = None
+        self._rename_armed = False
+        self._suppress_item_change = False
+
+        self.app = None
+        self.window = None
+        self.tree = None
+        self.entries = None
+        self.path_label = None
+        self.user_label = None
+        self.search_edit = None
+        self.useradd_action = None
 
     def run(self) -> None:
         if self.fs_getter() is None:
             raise FileSystemGuiError("file system is not mounted")
-        self.root = tk.Tk()
-        self.root.title(self._window_title())
-        self.root.geometry("1080x640")
-        self._create_images()
+        self._ensure_qt_available()
+        self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+        self.window = QtWidgets.QMainWindow()
+        self.window.setWindowTitle(self._window_title())
+        self.window.resize(1160, 680)
         self._build_ui()
         self.refresh()
-        self.root.mainloop()
+        self.window.show()
+        self.app.exec()
+
+    def _ensure_qt_available(self) -> None:
+        if QtWidgets is None:
+            raise FileSystemGuiError(
+                "PySide6 is required for gui mode. Install it with "
+                "'python -m pip install -r requirements.txt'."
+            )
+        if sys.platform.startswith("linux") and not (
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        ):
+            raise FileSystemGuiError(
+                "gui requires a graphical display. On WSL, use WSLg or configure "
+                "an X server/DISPLAY."
+            )
 
     def _build_ui(self) -> None:
-        assert self.root is not None
-        self.path_var = tk.StringVar()
-        self.user_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="就绪")
-        self.search_var = tk.StringVar()
-
+        assert self.window is not None
+        self.window.setStyleSheet(
+            """
+            QMainWindow { background: #f4f6f8; }
+            QToolBar { background: #eef2f6; spacing: 4px; padding: 4px 6px; }
+            QTreeWidget { background: white; border: 1px solid #c7d0d9; font-size: 13px; }
+            QHeaderView::section { background: #edf3f8; padding: 6px; border: 0; border-right: 1px solid #d7dee6; }
+            QLineEdit { padding: 5px 8px; border: 1px solid #b8c5d1; border-radius: 4px; background: white; }
+            QLabel#PathLabel { color: #1f3b57; font-weight: 600; }
+            """
+        )
         self._build_menu()
         self._build_toolbar()
 
-        header = ttk.Frame(self.root, padding=(10, 6, 10, 0))
-        header.pack(fill=tk.X)
-        ttk.Label(header, textvariable=self.path_var).pack(side=tk.LEFT)
-        ttk.Label(header, textvariable=self.user_var).pack(side=tk.RIGHT)
+        central = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
 
-        pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        header = QtWidgets.QHBoxLayout()
+        self.path_label = QtWidgets.QLabel()
+        self.path_label.setObjectName("PathLabel")
+        self.user_label = QtWidgets.QLabel()
+        header.addWidget(self.path_label)
+        header.addStretch(1)
+        header.addWidget(self.user_label)
+        layout.addLayout(header)
 
-        left = ttk.Frame(pane)
-        right = ttk.Frame(pane)
-        pane.add(left, weight=1)
-        pane.add(right, weight=3)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.tree.itemSelectionChanged.connect(self._on_tree_select)
+        self.tree.itemDoubleClicked.connect(lambda _item, _column: self._open_tree_selection())
+        self.tree.customContextMenuRequested.connect(self._on_tree_context)
 
-        self.tree = ttk.Treeview(left, show="tree")
-        self.tree.pack(fill=tk.BOTH, expand=True)
-        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
-        self.tree.bind("<Double-1>", self._on_tree_open)
-        self.tree.bind("<Button-3>", self._on_tree_context)
+        self.entries = QtWidgets.QTreeWidget()
+        self.entries.setColumnCount(6)
+        self.entries.setHeaderLabels(["名称", "类型", "大小", "权限", "Owner", "inode"])
+        self.entries.setRootIsDecorated(False)
+        self.entries.setAlternatingRowColors(True)
+        self.entries.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.entries.itemDoubleClicked.connect(lambda _item, _column: self.open_selected())
+        self.entries.customContextMenuRequested.connect(self._on_entry_context)
+        self.entries.itemChanged.connect(self._on_entry_changed)
+        self.entries.setColumnWidth(0, 360)
+        self.entries.setColumnWidth(1, 90)
+        self.entries.setColumnWidth(2, 90)
+        self.entries.setColumnWidth(3, 180)
+        self.entries.setColumnWidth(4, 80)
+        self.entries.setColumnWidth(5, 70)
 
-        self.entries = ttk.Treeview(
-            right,
-            columns=("type", "size", "mode", "owner", "inode"),
-            show="tree headings",
-            selectmode="browse",
-        )
-        self.entries.heading("#0", text="名称")
-        self.entries.heading("type", text="类型")
-        self.entries.heading("size", text="大小")
-        self.entries.heading("mode", text="权限")
-        self.entries.heading("owner", text="Owner")
-        self.entries.heading("inode", text="inode")
-        self.entries.column("#0", width=360, anchor=tk.W)
-        self.entries.column("type", width=90, anchor=tk.CENTER)
-        self.entries.column("size", width=90, anchor=tk.E)
-        self.entries.column("mode", width=180, anchor=tk.CENTER)
-        self.entries.column("owner", width=90, anchor=tk.CENTER)
-        self.entries.column("inode", width=90, anchor=tk.CENTER)
-        self.entries.pack(fill=tk.BOTH, expand=True)
-        self.entries.bind("<Double-1>", self._on_entry_open)
-        self.entries.bind("<Button-3>", self._on_entry_context)
-
-        ttk.Label(
-            self.root,
-            textvariable=self.status_var,
-            anchor=tk.W,
-            relief=tk.SUNKEN,
-            padding=(8, 4),
-        ).pack(fill=tk.X)
+        splitter.addWidget(self.tree)
+        splitter.addWidget(self.entries)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        layout.addWidget(splitter, 1)
+        self.window.setCentralWidget(central)
+        self.window.statusBar().showMessage("就绪")
 
     def _build_menu(self) -> None:
-        assert self.root is not None
-        menu = tk.Menu(self.root)
+        assert self.window is not None
+        menu = self.window.menuBar()
+        file_menu = menu.addMenu("文件")
+        self._add_action(file_menu, "挂载...", self.mount_disk)
+        self._add_action(file_menu, "格式化...", self.format_disk)
+        file_menu.addSeparator()
+        self._add_action(file_menu, "刷新", self.refresh)
+        self._add_action(file_menu, "退出图形模式", self.window.close)
 
-        file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(label="挂载...", command=self.mount_disk)
-        file_menu.add_command(label="格式化...", command=self.format_disk)
-        file_menu.add_separator()
-        file_menu.add_command(label="刷新", command=self.refresh)
-        file_menu.add_command(label="退出图形模式", command=self.root.destroy)
-        menu.add_cascade(label="文件", menu=file_menu)
+        edit_menu = menu.addMenu("编辑")
+        self._add_action(edit_menu, "新建文件", self.new_file)
+        self._add_action(edit_menu, "新建文件夹", self.new_dir)
+        self._add_action(edit_menu, "打开", self.open_selected)
+        self._add_action(edit_menu, "编辑", self.edit_selected)
+        self._add_action(edit_menu, "重命名", self.rename_selected)
+        self._add_action(edit_menu, "删除", self.delete_selected)
+        self._add_action(edit_menu, "属性", self.properties_selected)
 
-        edit_menu = tk.Menu(menu, tearoff=False)
-        edit_menu.add_command(label="新建文件", command=self.new_file)
-        edit_menu.add_command(label="新建文件夹", command=self.new_dir)
-        edit_menu.add_command(label="打开", command=self.open_selected)
-        edit_menu.add_command(label="编辑", command=self.edit_selected)
-        edit_menu.add_command(label="重命名", command=self.rename_selected)
-        edit_menu.add_command(label="删除", command=self.delete_selected)
-        edit_menu.add_command(label="属性", command=self.properties_selected)
-        menu.add_cascade(label="编辑", menu=edit_menu)
+        search_menu = menu.addMenu("搜索")
+        self._add_action(search_menu, "搜索当前目录", self.search)
+        self._add_action(search_menu, "清除搜索", self.clear_search)
 
-        search_menu = tk.Menu(menu, tearoff=False)
-        search_menu.add_command(label="搜索当前目录", command=self.search)
-        search_menu.add_command(label="清除搜索", command=self.clear_search)
-        menu.add_cascade(label="搜索", menu=search_menu)
-
-        user_menu = tk.Menu(menu, tearoff=False)
-        user_menu.add_command(label="登录...", command=self.login)
-        user_menu.add_command(label="注销", command=self.logout)
-        user_menu.add_command(label="切换用户...", command=self.su)
-        user_menu.add_command(label="新建用户...", command=self.useradd)
-        self._useradd_menu_index = user_menu.index(tk.END)
-        user_menu.add_command(label="修改密码...", command=self.passwd)
-        menu.add_cascade(label="用户", menu=user_menu)
-        self._user_menu = user_menu
-        self.root.config(menu=menu)
+        user_menu = menu.addMenu("用户")
+        self._add_action(user_menu, "登录...", self.login)
+        self._add_action(user_menu, "注销", self.logout)
+        self._add_action(user_menu, "切换用户...", self.su)
+        self.useradd_action = self._add_action(user_menu, "新建用户...", self.useradd)
+        self._add_action(user_menu, "修改密码...", self.passwd)
 
     def _build_toolbar(self) -> None:
-        assert self.root is not None
-        bar = ttk.Frame(self.root, padding=(10, 10, 10, 0))
-        bar.pack(fill=tk.X)
-        for text, command in (
+        assert self.window is not None
+        toolbar = QtWidgets.QToolBar("文件操作")
+        toolbar.setMovable(False)
+        self.window.addToolBar(toolbar)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonIconOnly)
+        toolbar.setIconSize(QtCore.QSize(22, 22))
+        for label, slot in (
             ("新建文件", self.new_file),
             ("新建文件夹", self.new_dir),
             ("打开", self.open_selected),
@@ -194,13 +225,20 @@ class FileSystemGui:
             ("上一级", self.go_up),
             ("刷新", self.refresh),
         ):
-            ttk.Button(bar, text=text, command=command).pack(side=tk.LEFT, padx=(0, 6))
-
-        search_box = ttk.Frame(bar)
-        search_box.pack(side=tk.RIGHT)
-        ttk.Entry(search_box, textvariable=self.search_var, width=24).pack(side=tk.LEFT)
-        ttk.Button(search_box, text="搜索", command=self.search).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(search_box, text="清除", command=self.clear_search).pack(side=tk.LEFT, padx=(6, 0))
+            action = toolbar.addAction(self._icon_for_action(label), "", slot)
+            action.setToolTip(label)
+        spacer = QtWidgets.QWidget()
+        spacer.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+        self.search_edit = QtWidgets.QLineEdit()
+        self.search_edit.setPlaceholderText("搜索当前目录，例如 *.txt")
+        self.search_edit.setFixedWidth(240)
+        self.search_edit.returnPressed.connect(self.search)
+        toolbar.addWidget(self.search_edit)
+        search_action = toolbar.addAction(self._icon_for_action("搜索"), "", self.search)
+        search_action.setToolTip("搜索")
+        clear_action = toolbar.addAction(self._icon_for_action("清除"), "", self.clear_search)
+        clear_action.setToolTip("清除")
 
     def refresh(self) -> None:
         if not self._can_show_dir(self.current_path):
@@ -215,14 +253,13 @@ class FileSystemGui:
         self._set_status("已刷新")
 
     def mount_disk(self) -> None:
-        initial = str(self.disk_path_getter()) if self.disk_path_getter else ""
-        path = filedialog.askopenfilename(title="选择磁盘镜像", initialfile=initial)
+        path, _filter = QtWidgets.QFileDialog.getOpenFileName(self.window, "选择磁盘镜像")
         if path:
             self._run(["mount", path], refresh_tree=True)
 
     def format_disk(self) -> None:
-        path = filedialog.asksaveasfilename(title="格式化磁盘镜像")
-        if path and messagebox.askyesno("确认格式化", f"格式化会清空磁盘：\n{path}\n是否继续？"):
+        path, _filter = QtWidgets.QFileDialog.getSaveFileName(self.window, "格式化磁盘镜像")
+        if path and self._confirm("确认格式化", f"格式化会清空磁盘：\n{path}\n是否继续？"):
             self._run(["format", path], refresh_tree=True)
 
     def new_file(self) -> None:
@@ -237,6 +274,9 @@ class FileSystemGui:
             return
         if self._is_dir(path):
             self._run(["cd", path])
+            return
+        if not self._can_read_path(path):
+            self._set_status("当前用户没有打开该文件的权限")
             return
         ok, output = self._run(["cat", path], refresh=False)
         if ok:
@@ -262,8 +302,7 @@ class FileSystemGui:
         if not (self._can_write_path(parent_path) and self._can_execute_path(parent_path)):
             self._set_status("当前用户没有重命名该项目的权限")
             return
-        old_name = posixpath.basename(path.rstrip("/"))
-        self._begin_inline_rename(path, old_name)
+        self._begin_inline_rename(path)
 
     def delete_selected(self) -> None:
         path = self._selected_path()
@@ -273,10 +312,10 @@ class FileSystemGui:
         if not (self._can_write_path(parent_path) and self._can_execute_path(parent_path)):
             self._set_status("当前用户没有删除该项目的权限")
             return
-        if not messagebox.askyesno("确认删除", f"删除 {path}？"):
+        if not self._confirm("确认删除", f"删除 {path}？"):
             return
         if self._is_dir(path):
-            recursive = messagebox.askyesno("目录删除", "是否递归删除该目录？")
+            recursive = self._confirm("目录删除", "是否递归删除该目录？")
             argv = ["rmdir", "-r", path] if recursive else ["rmdir", path]
         else:
             argv = ["rm", path]
@@ -291,7 +330,7 @@ class FileSystemGui:
             self._set_status("当前用户没有在当前目录创建硬链接的权限")
             return
         default = self._default_name(f"{posixpath.basename(path)}-link")
-        name = self._ask_name("创建硬链接", "链接名称：", default)
+        name = self._ask_text("创建硬链接", "链接名称：", default)
         if name:
             self._run(["ln", path, self._child_path(name)])
 
@@ -303,7 +342,7 @@ class FileSystemGui:
         if path is None:
             return
         current = str(self._stat(path).get("mode", ""))
-        mode = self._ask_name(
+        mode = self._ask_text(
             "修改权限",
             (
                 "请输入两位八进制权限。\n"
@@ -321,23 +360,12 @@ class FileSystemGui:
         path = self._selected_path() or self.current_path
         self._show_properties(path)
 
-    def _create_default_entry(self, *, is_dir: bool) -> None:
-        if not (self._can_write_path(self.current_path) and self._can_execute_path(self.current_path)):
-            self._set_status("当前用户没有在当前目录中新建项目的权限")
-            return
-        default_name = self._default_name("新建文件夹" if is_dir else "新建文件.txt")
-        path = self._child_path(default_name)
-        ok, _output = self._run(["mkdir" if is_dir else "touch", path])
-        if ok:
-            self._select_entry_path(path)
-            self._begin_inline_rename(path, default_name)
-
     def search(self) -> None:
-        assert self.search_var is not None
-        pattern = self.search_var.get().strip()
+        pattern = self.search_edit.text().strip() if self.search_edit is not None else ""
         if not pattern:
-            pattern = simpledialog.askstring("搜索", "输入匹配模式，例如 *.txt：") or ""
-            self.search_var.set(pattern)
+            pattern = self._ask_text("搜索", "输入匹配模式，例如 *.txt：", "")
+            if self.search_edit is not None:
+                self.search_edit.setText(pattern or "")
         if not pattern:
             return
         self._log_command(["find", self.current_path, pattern])
@@ -347,8 +375,8 @@ class FileSystemGui:
         self._set_status(f"搜索 {pattern}: {len(matches)} 项")
 
     def clear_search(self) -> None:
-        assert self.search_var is not None
-        self.search_var.set("")
+        if self.search_edit is not None:
+            self.search_edit.clear()
         self._search_mode = False
         self._refresh_entries()
         self._set_status("已清除搜索")
@@ -358,10 +386,10 @@ class FileSystemGui:
             self._run(["cd", posixpath.dirname(self.current_path.rstrip("/")) or "/"])
 
     def login(self) -> None:
-        username = simpledialog.askstring("登录", "用户名：")
+        username = self._ask_text("登录", "用户名：", "")
         if not username:
             return
-        password = simpledialog.askstring("登录", "密码：", show="*")
+        password = self._ask_text("登录", "密码：", "", password=True)
         if password is None:
             return
         self._log_command(["login", username])
@@ -380,10 +408,10 @@ class FileSystemGui:
         self._run(["logout"])
 
     def su(self) -> None:
-        username = simpledialog.askstring("切换用户", "用户名：")
+        username = self._ask_text("切换用户", "用户名：", "")
         if not username:
             return
-        password = simpledialog.askstring("切换用户", "密码：", show="*")
+        password = self._ask_text("切换用户", "密码：", "", password=True)
         if password is None:
             return
         self._log_command(["su", username])
@@ -399,10 +427,10 @@ class FileSystemGui:
         if not self._can_manage_users():
             self._set_status("只有 root 用户可以新建用户")
             return
-        username = simpledialog.askstring("新建用户", "用户名：")
+        username = self._ask_text("新建用户", "用户名：", "")
         if not username:
             return
-        password = simpledialog.askstring("新建用户", "密码：", show="*")
+        password = self._ask_text("新建用户", "密码：", "", password=True)
         if password is None:
             return
         self._log_command(["useradd", username])
@@ -414,8 +442,8 @@ class FileSystemGui:
             self._show_error("useradd", exc)
 
     def passwd(self) -> None:
-        username = simpledialog.askstring("修改密码", "用户名（留空表示当前用户）：")
-        password = simpledialog.askstring("修改密码", "新密码：", show="*")
+        username = self._ask_text("修改密码", "用户名（留空表示当前用户）：", "")
+        password = self._ask_text("修改密码", "新密码：", "", password=True)
         if password is None:
             return
         argv = ["passwd"] + ([username] if username else [])
@@ -426,124 +454,113 @@ class FileSystemGui:
         except FileSystemError as exc:
             self._show_error("passwd", exc)
 
+    def _create_default_entry(self, *, is_dir: bool) -> None:
+        if not (self._can_write_path(self.current_path) and self._can_execute_path(self.current_path)):
+            self._set_status("当前用户没有在当前目录中新建项目的权限")
+            return
+        default_name = self._default_name("新建文件夹" if is_dir else "新建文件.txt")
+        path = self._child_path(default_name)
+        ok, _output = self._run(["mkdir" if is_dir else "touch", path])
+        if ok:
+            self._select_entry_path(path)
+            self._begin_inline_rename(path)
+
     def _refresh_tree(self) -> None:
         assert self.tree is not None
-        self.tree.delete(*self.tree.get_children())
+        self.tree.clear()
         self._tree_paths.clear()
-        root_id = self.tree.insert("", tk.END, text="/", image=self._images["folder_open"], open=True)
-        self._tree_paths[root_id] = "/"
-        self._fill_tree_node(root_id, "/")
+        root = QtWidgets.QTreeWidgetItem(["/"])
+        root.setIcon(0, self._folder_icon(opened=True))
+        self.tree.addTopLevelItem(root)
+        root.setExpanded(True)
+        self._tree_paths[root] = "/"
+        self._fill_tree_node(root, "/")
 
-    def _fill_tree_node(self, item_id: str, path: str) -> None:
-        assert self.tree is not None
+    def _fill_tree_node(self, item: object, path: str) -> None:
         for entry in self._entries(path):
             if entry.type_id != DIR_TYPE:
                 continue
-            child_id = self.tree.insert(
-                item_id,
-                tk.END,
-                text=entry.name,
-                image=self._images["folder"],
-                open=entry.path == self.current_path,
-            )
-            self._tree_paths[child_id] = entry.path
-            self._fill_tree_node(child_id, entry.path)
+            child = QtWidgets.QTreeWidgetItem([entry.name])
+            child.setIcon(0, self._folder_icon())
+            item.addChild(child)
+            child.setExpanded(entry.path == self.current_path)
+            self._tree_paths[child] = entry.path
+            self._fill_tree_node(child, entry.path)
 
     def _refresh_entries(self, entries: list[GuiEntry] | None = None) -> None:
         assert self.entries is not None
-        self.entries.delete(*self.entries.get_children())
+        self._suppress_item_change = True
+        self.entries.clear()
         self._entry_paths.clear()
         self._path_types.clear()
         for entry in entries if entries is not None else self._entries(self.current_path):
             stat = self._stat(entry.path)
-            image = self._images["folder"] if entry.type_id == DIR_TYPE else self._images["file"]
-            item_id = self.entries.insert(
-                "",
-                tk.END,
-                text=entry.path if self._search_mode else entry.name,
-                image=image,
-                values=(
-                    "文件夹" if entry.type_id == DIR_TYPE else "文件",
-                    self._size_text(stat),
-                    self._permission_text(stat),
-                    stat.get("owner_id", "-"),
-                    stat.get("inode_id", "-"),
-                ),
-            )
-            self._entry_paths[item_id] = entry.path
+            item = QtWidgets.QTreeWidgetItem([
+                entry.path if self._search_mode else entry.name,
+                "文件夹" if entry.type_id == DIR_TYPE else "文件",
+                self._size_text(stat),
+                self._permission_text(stat),
+                str(stat.get("owner_id", "-")),
+                str(stat.get("inode_id", "-")),
+            ])
+            item.setIcon(0, self._folder_icon() if entry.type_id == DIR_TYPE else self._file_icon())
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable)
+            item.setTextAlignment(3, QtCore.Qt.AlignCenter)
+            self.entries.addTopLevelItem(item)
+            self._entry_paths[item] = entry.path
             self._path_types[entry.path] = entry.type_id
+        self._suppress_item_change = False
 
     def _refresh_entries_only(self) -> None:
         self._search_mode = False
         self._update_header()
         self._refresh_entries()
 
-    def _on_tree_select(self, _event: object) -> None:
-        path = self._selected_tree_path()
+    def _on_tree_select(self) -> None:
+        item = self.tree.currentItem() if self.tree is not None else None
+        path = self._tree_paths.get(item)
         if path:
             self.current_path = path
             self._search_mode = False
             self._update_header()
             self._refresh_entries()
 
-    def _on_tree_open(self, _event: object) -> None:
-        path = self._selected_tree_path()
+    def _open_tree_selection(self) -> None:
+        item = self.tree.currentItem() if self.tree is not None else None
+        path = self._tree_paths.get(item)
         if path:
             self._run(["cd", path])
 
-    def _on_entry_open(self, _event: object) -> None:
-        self.open_selected()
-
-    def _on_tree_context(self, event: tk.Event) -> None:
+    def _on_tree_context(self, pos: object) -> None:
         assert self.tree is not None
-        item_id = self.tree.identify_row(event.y)
-        if item_id:
-            self.tree.selection_set(item_id)
-            path = self._tree_paths.get(item_id, self.current_path)
+        item = self.tree.itemAt(pos)
+        if item is not None:
+            self.tree.setCurrentItem(item)
+            path = self._tree_paths.get(item, self.current_path)
             self.current_path = path
             self._update_header()
             self._refresh_entries()
-        self._show_context_menu(event, target_path=self.current_path, is_background=True)
+        self._show_context_menu(self.tree.mapToGlobal(pos), self.current_path, True)
 
-    def _on_entry_context(self, event: tk.Event) -> None:
+    def _on_entry_context(self, pos: object) -> None:
         assert self.entries is not None
-        item_id = self.entries.identify_row(event.y)
-        if item_id:
-            self.entries.selection_set(item_id)
-            path = self._entry_paths.get(item_id)
-            self._show_context_menu(event, target_path=path, is_background=False)
+        item = self.entries.itemAt(pos)
+        if item is not None:
+            self.entries.setCurrentItem(item)
+            self._show_context_menu(self.entries.mapToGlobal(pos), self._entry_paths.get(item), False)
         else:
-            self._show_context_menu(event, target_path=self.current_path, is_background=True)
+            self._show_context_menu(self.entries.mapToGlobal(pos), self.current_path, True)
 
-    def _show_context_menu(
-        self,
-        event: tk.Event,
-        *,
-        target_path: str | None,
-        is_background: bool,
-    ) -> None:
-        assert self.root is not None
-        menu = tk.Menu(self.root, tearoff=False)
+    def _show_context_menu(self, global_pos: object, target_path: str | None, is_background: bool) -> None:
+        menu = QtWidgets.QMenu(self.window)
         if is_background:
             can_create = self._can_write_path(self.current_path) and self._can_execute_path(self.current_path)
-            menu.add_command(
-                label="新建文件",
-                command=self.new_file,
-                state=tk.NORMAL if can_create else tk.DISABLED,
-            )
-            menu.add_command(
-                label="新建文件夹",
-                command=self.new_dir,
-                state=tk.NORMAL if can_create else tk.DISABLED,
-            )
-            menu.add_separator()
-            menu.add_command(
-                label="搜索此目录",
-                command=self.search,
-                state=tk.NORMAL if self._can_read_path(self.current_path) else tk.DISABLED,
-            )
-            menu.add_command(label="刷新", command=self.refresh)
-            menu.tk_popup(event.x_root, event.y_root)
+            self._add_action(menu, "新建文件", self.new_file, can_create)
+            self._add_action(menu, "新建文件夹", self.new_dir, can_create)
+            menu.addSeparator()
+            self._add_action(menu, "搜索此目录", self.search, self._can_read_path(self.current_path))
+            self._add_action(menu, "刷新", self.refresh)
+            menu.exec(global_pos)
             return
 
         is_dir = bool(target_path and self._is_dir(target_path))
@@ -557,51 +574,19 @@ class FileSystemGui:
             and self._can_write_path(target_path)
             and self._can_execute_path(target_path)
         )
-        menu.add_command(
-            label="打开",
-            command=self.open_selected,
-            state=tk.NORMAL if can_read else tk.DISABLED,
-        )
+        self._add_action(menu, "打开", self.open_selected, can_read)
         if not is_dir:
-            menu.add_command(
-                label="编辑",
-                command=self.edit_selected,
-                state=tk.NORMAL if can_read and can_write_target else tk.DISABLED,
-            )
-            menu.add_command(
-                label="创建硬链接",
-                command=self.link_selected,
-                state=tk.NORMAL if can_write_parent else tk.DISABLED,
-            )
+            self._add_action(menu, "编辑", self.edit_selected, can_read and can_write_target)
+            self._add_action(menu, "创建硬链接", self.link_selected, can_write_parent)
         if is_dir:
-            menu.add_command(
-                label="在此目录中新建文件",
-                command=lambda: self._new_inside(target_path, False),
-                state=tk.NORMAL if can_create_inside else tk.DISABLED,
-            )
-            menu.add_command(
-                label="在此目录中新建文件夹",
-                command=lambda: self._new_inside(target_path, True),
-                state=tk.NORMAL if can_create_inside else tk.DISABLED,
-            )
-        menu.add_separator()
-        menu.add_command(
-            label="重命名",
-            command=self.rename_selected,
-            state=tk.NORMAL if can_write_parent else tk.DISABLED,
-        )
-        menu.add_command(
-            label="删除",
-            command=self.delete_selected,
-            state=tk.NORMAL if can_write_parent else tk.DISABLED,
-        )
-        menu.add_command(
-            label="修改权限",
-            command=self.chmod_selected,
-            state=tk.NORMAL if self._can_change_permissions() else tk.DISABLED,
-        )
-        menu.add_command(label="属性", command=self.properties_selected)
-        menu.tk_popup(event.x_root, event.y_root)
+            self._add_action(menu, "在此目录中新建文件", lambda: self._new_inside(target_path, False), can_create_inside)
+            self._add_action(menu, "在此目录中新建文件夹", lambda: self._new_inside(target_path, True), can_create_inside)
+        menu.addSeparator()
+        self._add_action(menu, "重命名", self.rename_selected, can_write_parent)
+        self._add_action(menu, "删除", self.delete_selected, can_write_parent)
+        self._add_action(menu, "修改权限", self.chmod_selected, self._can_change_permissions())
+        self._add_action(menu, "属性", self.properties_selected)
+        menu.exec(global_pos)
 
     def _new_inside(self, path: str | None, is_dir: bool) -> None:
         if not path:
@@ -610,74 +595,51 @@ class FileSystemGui:
         self._update_header()
         self.new_dir() if is_dir else self.new_file()
 
-    def _selected_tree_path(self) -> str | None:
-        assert self.tree is not None
-        selection = self.tree.selection()
-        return self._tree_paths.get(selection[0]) if selection else None
-
     def _selected_path(self) -> str | None:
-        assert self.entries is not None
-        selection = self.entries.selection()
-        if selection:
-            return self._entry_paths.get(selection[0])
-        return self._selected_tree_path()
+        item = self.entries.currentItem() if self.entries is not None else None
+        if item is not None:
+            return self._entry_paths.get(item)
+        item = self.tree.currentItem() if self.tree is not None else None
+        return self._tree_paths.get(item)
 
     def _select_entry_path(self, path: str) -> None:
         assert self.entries is not None
-        for item_id, item_path in self._entry_paths.items():
+        for item, item_path in self._entry_paths.items():
             if item_path == path:
-                self.entries.selection_set(item_id)
-                self.entries.focus(item_id)
-                self.entries.see(item_id)
+                self.entries.setCurrentItem(item)
+                self.entries.scrollToItem(item)
                 return
 
-    def _begin_inline_rename(self, path: str, initial: str) -> None:
+    def _begin_inline_rename(self, path: str) -> None:
         assert self.entries is not None
-        assert self.root is not None
-        self._destroy_rename_editor()
-        item_id = None
-        for current_item_id, item_path in self._entry_paths.items():
+        for item, item_path in self._entry_paths.items():
             if item_path == path:
-                item_id = current_item_id
-                break
-        if item_id is None:
-            return
-
-        self.entries.selection_set(item_id)
-        self.entries.focus(item_id)
-        self.entries.see(item_id)
-        bbox = self.entries.bbox(item_id, "#0")
-        if not bbox:
-            return
-        x, y, width, height = bbox
-        editor = ttk.Entry(self.entries)
-        editor.insert(0, initial)
-        editor.select_range(0, tk.END)
-        editor.focus_set()
-        editor.place(x=x + 22, y=y, width=max(width - 22, 120), height=height)
-        self._rename_editor = editor
-
-        def commit(_event: object | None = None) -> None:
-            new_name = editor.get().strip()
-            self._destroy_rename_editor()
-            if not new_name or new_name == initial:
+                self._renaming_path = path
+                self._rename_armed = True
+                self.entries.editItem(item, 0)
                 return
-            if "/" in new_name:
-                messagebox.showerror("重命名", "名称不能包含 /")
-                return
-            self._run(["rename", path, new_name])
 
-        def cancel(_event: object | None = None) -> None:
-            self._destroy_rename_editor()
-
-        editor.bind("<Return>", commit)
-        editor.bind("<Escape>", cancel)
-        editor.bind("<FocusOut>", cancel)
-
-    def _destroy_rename_editor(self) -> None:
-        if self._rename_editor is not None:
-            self._rename_editor.destroy()
-            self._rename_editor = None
+    def _on_entry_changed(self, item: object, column: int) -> None:
+        if (
+            self._suppress_item_change
+            or column != 0
+            or self._renaming_path is None
+            or not self._rename_armed
+        ):
+            return
+        old_path = self._renaming_path
+        self._renaming_path = None
+        self._rename_armed = False
+        old_name = posixpath.basename(old_path.rstrip("/"))
+        new_name = item.text(0).strip()
+        if not new_name or new_name == old_name:
+            self._refresh_entries_only()
+            return
+        if "/" in new_name:
+            self._show_message("重命名", "名称不能包含 /", error=True)
+            self._refresh_entries_only()
+            return
+        self._run(["rename", old_path, new_name])
 
     def _run(
         self,
@@ -698,7 +660,7 @@ class FileSystemGui:
         if not ok:
             self._set_status(output or "命令执行失败")
             if output:
-                messagebox.showerror("命令失败", output)
+                self._show_message("命令失败", output, error=True)
         else:
             self._set_status(command)
         return ok, output
@@ -707,33 +669,34 @@ class FileSystemGui:
         if self.command_logger is not None:
             self.command_logger(shlex.join(argv))
 
-    def _show_text(
-        self,
-        title: str,
-        content: str,
-        *,
-        readonly: bool,
-        save_path: str | None = None,
-    ) -> None:
-        assert self.root is not None
-        window = tk.Toplevel(self.root)
-        window.title(title)
-        window.geometry("720x480")
-        text = tk.Text(window, wrap=tk.WORD)
-        text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        text.insert("1.0", content)
+    def _show_text(self, title: str, content: str, *, readonly: bool, save_path: str | None = None) -> None:
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle(title)
+        dialog.resize(760, 520)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        editor = QtWidgets.QPlainTextEdit()
+        editor.setPlainText(content)
+        editor.setReadOnly(readonly)
+        layout.addWidget(editor)
+        buttons = QtWidgets.QDialogButtonBox()
         if readonly:
-            text.configure(state=tk.DISABLED)
+            buttons.addButton("关闭", QtWidgets.QDialogButtonBox.AcceptRole)
+        else:
+            buttons.addButton("保存", QtWidgets.QDialogButtonBox.AcceptRole)
+            buttons.addButton("取消", QtWidgets.QDialogButtonBox.RejectRole)
+        buttons.accepted.connect(lambda: self._save_editor(dialog, editor, save_path, readonly))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def _save_editor(self, dialog: object, editor: object, save_path: str | None, readonly: bool) -> None:
+        if readonly:
+            dialog.accept()
             return
-
-        def save() -> None:
-            assert save_path is not None
-            data = text.get("1.0", tk.END).rstrip("\n")
-            ok, _output = self._run(["write", save_path, data])
-            if ok:
-                window.destroy()
-
-        ttk.Button(window, text="保存", command=save).pack(pady=(0, 8))
+        assert save_path is not None
+        ok, _output = self._run(["write", save_path, editor.toPlainText()])
+        if ok:
+            dialog.accept()
 
     def _show_properties(self, path: str) -> None:
         stat = self._stat(path)
@@ -747,36 +710,31 @@ class FileSystemGui:
             f"大小: {stat.get('size', '-')} bytes",
         ]
         if self._is_dir(path):
-            entries = self._entries(path)
-            rows.append(f"包含项目: {len(entries)}")
+            rows.append(f"包含项目: {len(self._entries(path))}")
         self._show_text(f"属性：{path}", "\n".join(rows), readonly=True)
 
-    def _ask_name(self, title: str, prompt: str, initial: str) -> str | None:
-        name = simpledialog.askstring(title, prompt, initialvalue=initial)
-        if name is None:
+    def _ask_text(self, title: str, label: str, initial: str, *, password: bool = False) -> str | None:
+        dialog = QtWidgets.QInputDialog(self.window)
+        dialog.setWindowTitle(title)
+        dialog.setLabelText(label)
+        dialog.setTextValue(initial)
+        if password:
+            dialog.setTextEchoMode(QtWidgets.QLineEdit.Password)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
             return None
-        name = name.strip()
-        if not name:
-            messagebox.showerror(title, "名称不能为空")
+        value = dialog.textValue().strip()
+        if "/" in value:
+            self._show_message(title, "名称不能包含 /", error=True)
             return None
-        if "/" in name:
-            messagebox.showerror(title, "名称不能包含 /")
-            return None
-        return name
+        return value
 
     def _entries(self, path: str) -> list[GuiEntry]:
         try:
             _inode, dir_block = self._fs()._resolve_dir(path)
         except FileSystemError:
             return []
-        entries = [
-            GuiEntry(name, self._join(path, name), DIR_TYPE)
-            for name in sorted(dir_block.son_dirs)
-        ]
-        entries.extend(
-            GuiEntry(name, self._join(path, name), FILE_TYPE)
-            for name in sorted(dir_block.son_files)
-        )
+        entries = [GuiEntry(name, self._join(path, name), DIR_TYPE) for name in sorted(dir_block.son_dirs)]
+        entries.extend(GuiEntry(name, self._join(path, name), FILE_TYPE) for name in sorted(dir_block.son_files))
         return entries
 
     def _find_entries(self, path: str, pattern: str) -> list[GuiEntry]:
@@ -818,12 +776,8 @@ class FileSystemGui:
         except FileSystemError:
             return False
 
-    def _parent_path(self, path: str) -> str:
-        return posixpath.dirname(path.rstrip("/")) or "/"
-
     def _permission_text(self, stat: dict[str, object]) -> str:
-        mode = stat.get("mode", "-")
-        text = str(mode)
+        text = str(stat.get("mode", "-"))
         if len(text) != 2 or any(ch not in "01234567" for ch in text):
             return text
         username = self._current_username()
@@ -855,16 +809,6 @@ class FileSystemGui:
             names.append("执行")
         return "/".join(names) if names else "无"
 
-    def _is_root_user(self) -> bool:
-        fs = self.fs_getter()
-        return fs is not None and fs.current_user is not None and fs.current_user.name == "root"
-
-    def _current_username(self) -> str:
-        fs = self.fs_getter()
-        if fs is None or fs.current_user is None:
-            return "当前用户"
-        return fs.current_user.name
-
     def _is_dir(self, path: str) -> bool:
         if path in self._path_types:
             return self._path_types[path] == DIR_TYPE
@@ -886,9 +830,7 @@ class FileSystemGui:
         return base
 
     def _size_text(self, stat: dict[str, object]) -> str:
-        if stat.get("type") == "dir":
-            return ""
-        return str(stat.get("size", ""))
+        return "" if stat.get("type") == "dir" else str(stat.get("size", ""))
 
     def _child_path(self, name: str) -> str:
         return self._join(self.current_path, name)
@@ -896,16 +838,18 @@ class FileSystemGui:
     def _join(self, parent: str, name: str) -> str:
         return posixpath.join(parent, name) if parent != "/" else f"/{name}"
 
+    def _parent_path(self, path: str) -> str:
+        return posixpath.dirname(path.rstrip("/")) or "/"
+
     def _update_header(self) -> None:
-        fs = self.fs_getter()
-        user = fs.whoami() if fs is not None else "-"
-        if self.path_var is not None:
-            self.path_var.set(f"当前路径: {self.current_path}")
-        if self.user_var is not None:
-            self.user_var.set(f"用户: {user}")
+        user = self._fs().whoami() if self.fs_getter() is not None else "-"
+        if self.path_label is not None:
+            self.path_label.setText(f"当前路径: {self.current_path}")
+        if self.user_label is not None:
+            self.user_label.setText(f"用户: {user}")
+        if self.window is not None:
+            self.window.setWindowTitle(self._window_title())
         self._update_user_actions()
-        if self.root is not None:
-            self.root.title(self._window_title())
 
     def _window_title(self) -> str:
         fs = self.fs_getter()
@@ -913,14 +857,22 @@ class FileSystemGui:
         return f"文件管理系统 - {user}"
 
     def _set_status(self, text: str) -> None:
-        if self.status_var is not None:
-            self.status_var.set(text)
+        if self.window is not None:
+            self.window.statusBar().showMessage(text)
 
     def _update_user_actions(self) -> None:
-        if self._user_menu is None or self._useradd_menu_index is None:
-            return
-        state = tk.NORMAL if self._can_manage_users() else tk.DISABLED
-        self._user_menu.entryconfig(self._useradd_menu_index, state=state)
+        if self.useradd_action is not None:
+            self.useradd_action.setEnabled(self._can_manage_users())
+
+    def _is_root_user(self) -> bool:
+        fs = self.fs_getter()
+        return fs is not None and fs.current_user is not None and fs.current_user.name == "root"
+
+    def _current_username(self) -> str:
+        fs = self.fs_getter()
+        if fs is None or fs.current_user is None:
+            return "当前用户"
+        return fs.current_user.name
 
     def _can_manage_users(self) -> bool:
         return self._is_root_user()
@@ -930,13 +882,9 @@ class FileSystemGui:
 
     def _show_error(self, command: str, exc: Exception) -> None:
         message = str(exc)
-        text = (
-            self.error_formatter(command, message)
-            if self.error_formatter is not None
-            else f"{command}: {message}"
-        )
+        text = self.error_formatter(command, message) if self.error_formatter is not None else f"{command}: {message}"
         self._set_status(text)
-        messagebox.showerror("操作失败", text)
+        self._show_message("操作失败", text, error=True)
 
     def _fs(self) -> FileSystem:
         fs = self.fs_getter()
@@ -944,14 +892,60 @@ class FileSystemGui:
             raise FileSystemGuiError("file system is not mounted")
         return fs
 
-    def _create_images(self) -> None:
-        assert self.root is not None
-        self._images["folder"] = self._solid_icon("#f4c542", "#d49b19")
-        self._images["folder_open"] = self._solid_icon("#ffd86b", "#d49b19")
-        self._images["file"] = self._solid_icon("#f7fbff", "#7f9db9")
+    def _add_action(self, menu_or_toolbar: object, label: str, slot: Callable[[], None], enabled: bool = True) -> object:
+        action = QtGui.QAction(self._icon_for_action(label), label, self.window)
+        action.triggered.connect(slot)
+        action.setEnabled(enabled)
+        menu_or_toolbar.addAction(action)
+        return action
 
-    def _solid_icon(self, fill: str, outline: str) -> tk.PhotoImage:
-        image = tk.PhotoImage(width=16, height=16)
-        image.put(outline, to=(2, 2, 14, 15))
-        image.put(fill, to=(3, 3, 13, 14))
-        return image
+    def _icon_for_action(self, label: str) -> object:
+        style = self.window.style() if self.window is not None else QtWidgets.QApplication.style()
+        icon_path = self._icon_resource_path(label)
+        if icon_path is not None:
+            icon = QtGui.QIcon(str(icon_path))
+            if not icon.isNull():
+                return icon
+        if "文件夹" in label:
+            return style.standardIcon(QtWidgets.QStyle.SP_DirIcon)
+        if "打开" in label:
+            return style.standardIcon(QtWidgets.QStyle.SP_DialogOpenButton)
+        if "删除" in label:
+            return style.standardIcon(QtWidgets.QStyle.SP_TrashIcon)
+        if "刷新" in label:
+            return style.standardIcon(QtWidgets.QStyle.SP_BrowserReload)
+        if "搜索" in label:
+            return style.standardIcon(QtWidgets.QStyle.SP_FileDialogContentsView)
+        if "清除" in label:
+            return style.standardIcon(QtWidgets.QStyle.SP_DialogCancelButton)
+        return QtGui.QIcon()
+
+    def _icon_resource_path(self, label: str) -> Path | None:
+        for keyword, filename in ACTION_ICON_FILES.items():
+            if keyword in label:
+                path = FIGURE_DIR / filename
+                if path.exists():
+                    return path
+        return None
+
+    def _folder_icon(self, *, opened: bool = False) -> object:
+        style = self.window.style()
+        icon = QtWidgets.QStyle.SP_DirOpenIcon if opened else QtWidgets.QStyle.SP_DirIcon
+        return style.standardIcon(icon)
+
+    def _file_icon(self) -> object:
+        return self.window.style().standardIcon(QtWidgets.QStyle.SP_FileIcon)
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return QtWidgets.QMessageBox.question(
+            self.window,
+            title,
+            text,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        ) == QtWidgets.QMessageBox.Yes
+
+    def _show_message(self, title: str, text: str, *, error: bool = False) -> None:
+        if error:
+            QtWidgets.QMessageBox.critical(self.window, title, text)
+        else:
+            QtWidgets.QMessageBox.information(self.window, title, text)

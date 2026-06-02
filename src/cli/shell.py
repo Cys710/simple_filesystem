@@ -17,6 +17,7 @@ from typing import Callable, TextIO
 from head import DISK_NAME, GREEN, RESET
 from core.file_system import FileSystem, FileSystemError
 from cli.completion import CommandCompleter, SHELL_COMMANDS
+from cli.encoding import configure_terminal_encoding
 from utils import INDIRECT_INDEX_TEST_BYTES, append_test_data, logo
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -48,11 +49,14 @@ except ImportError:
 
 try:
     from cli.gui_mode import FileSystemGui, FileSystemGuiError
-except ImportError:
+except ImportError as exc:
     FileSystemGui = None
+    GUI_IMPORT_ERROR = str(exc)
 
     class FileSystemGuiError(Exception):
         pass
+else:
+    GUI_IMPORT_ERROR = ""
 
 # Shell 解析用户输入的命令并调用 FileSystem 的方法实现功能。
 class Shell:
@@ -65,6 +69,7 @@ class Shell:
         password_func: Callable[[str], str] = getpass,
         output: TextIO | None = None,
     ):
+        configure_terminal_encoding()
         self.disk_path = Path(disk_path)
         self.input_func = input_func
         self.password_func = password_func
@@ -438,7 +443,8 @@ class Shell:
         if self.fs.current_user is None:
             raise FileSystemError("login required")
         if FileSystemGui is None:
-            raise FileSystemError("gui is unavailable in this environment")
+            detail = f": {GUI_IMPORT_ERROR}" if GUI_IMPORT_ERROR else ""
+            raise FileSystemError(f"gui is unavailable in this environment{detail}")
         FileSystemGui(
             lambda: self.fs,
             self._execute_gui_command,
@@ -918,8 +924,14 @@ class Shell:
             return f"{cmd}: password cannot be empty"
         if message == "monitor is unavailable in this environment":
             return f"{cmd}: monitor is unavailable in this environment"
-        if message == "gui is unavailable in this environment":
-            return f"{cmd}: gui is unavailable in this environment"
+        if message.startswith("gui is unavailable in this environment"):
+            return (
+                f"{cmd}: {message}. Install dependencies with "
+                "'python -m pip install -r requirements.txt'. On WSL, also run "
+                "under WSLg or configure an X server/DISPLAY."
+            )
+        if message.startswith("gui requires a graphical display"):
+            return f"{cmd}: {message}"
         if message.startswith("recursive script include detected: "):
             return f"{cmd}: recursive script include detected: {message.removeprefix('recursive script include detected: ')}"
         if message.startswith("invalid script syntax in "):

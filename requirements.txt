@@ -1,2 +1,6 @@
 prompt-toolkit>=3.0,<4.0
+PySide6>=6.7,<7.0
 windows-curses>=2.4,<3.0; sys_platform == "win32"
+
+# GUI mode uses PySide6/Qt.
+# On WSL it also needs WSLg or a configured X server/DISPLAY for windows to open.

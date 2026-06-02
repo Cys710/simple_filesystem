@@ -12,7 +12,8 @@ SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
 
 from cli.shell import Shell
-from cli.gui_mode import FileSystemGui
+from cli import gui_mode
+from cli.gui_mode import FileSystemGui, FileSystemGuiError
 from user import DEFAULT_ROOT_PASSWORD
 
 
@@ -74,6 +75,53 @@ class TestGuiModeCommand(unittest.TestCase):
             self.assertEqual(gui._default_name("新建文件.txt"), "新建文件 (2).txt")
         finally:
             temp_dir.cleanup()
+
+    def test_gui_reports_missing_qt_dependency(self):
+        temp_dir, shell, _output = self.make_shell()
+        try:
+            shell.execute("format")
+            gui = FileSystemGui(lambda: shell.fs, lambda _command: (True, ""))
+
+            with patch("cli.gui_mode.QtWidgets", None):
+                with self.assertRaisesRegex(FileSystemGuiError, "PySide6"):
+                    gui.run()
+        finally:
+            temp_dir.cleanup()
+
+    def test_gui_reports_missing_graphical_display(self):
+        if gui_mode.QtWidgets is None:
+            self.skipTest("PySide6 is not installed")
+        temp_dir, shell, _output = self.make_shell()
+        try:
+            shell.execute("format")
+            gui = FileSystemGui(lambda: shell.fs, lambda _command: (True, ""))
+
+            with patch.dict("os.environ", {"DISPLAY": "", "WAYLAND_DISPLAY": ""}, clear=False):
+                with patch("sys.platform", "linux"):
+                    with self.assertRaisesRegex(FileSystemGuiError, "graphical display"):
+                        gui.run()
+        finally:
+            temp_dir.cleanup()
+
+    def test_gui_uses_svg_icons_from_figure_directory(self):
+        gui = FileSystemGui(lambda: None, lambda _command: (True, ""))
+
+        expected_icons = {
+            "新建文件": "新建文件.svg",
+            "新建文件夹": "新建文件夹.svg",
+            "打开": "4打开文件.svg",
+            "编辑": "编辑.svg",
+            "删除": "删除.svg",
+            "属性": "属性.svg",
+            "上一级": "上一级.svg",
+            "刷新": "刷新.svg",
+        }
+
+        for label, filename in expected_icons.items():
+            icon_path = gui._icon_resource_path(label)
+            self.assertIsNotNone(icon_path)
+            self.assertEqual(icon_path.name, filename)
+            self.assertTrue(icon_path.exists())
 
     def test_gui_permission_text_and_root_only_useradd_state(self):
         temp_dir, shell, _output = self.make_shell()
