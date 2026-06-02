@@ -247,6 +247,9 @@ class FileSystemGui:
         if path is None or self._is_dir(path):
             self._set_status("请选择一个文件")
             return
+        if not (self._can_read_path(path) and self._can_write_path(path)):
+            self._set_status("当前用户没有编辑该文件的权限")
+            return
         ok, output = self._run(["cat", path], refresh=False)
         if ok:
             self._show_text(f"编辑：{path}", output, readonly=False, save_path=path)
@@ -255,12 +258,20 @@ class FileSystemGui:
         path = self._selected_path()
         if path is None or path == "/":
             return
+        parent_path = self._parent_path(path)
+        if not (self._can_write_path(parent_path) and self._can_execute_path(parent_path)):
+            self._set_status("当前用户没有重命名该项目的权限")
+            return
         old_name = posixpath.basename(path.rstrip("/"))
         self._begin_inline_rename(path, old_name)
 
     def delete_selected(self) -> None:
         path = self._selected_path()
         if path is None or path == "/":
+            return
+        parent_path = self._parent_path(path)
+        if not (self._can_write_path(parent_path) and self._can_execute_path(parent_path)):
+            self._set_status("当前用户没有删除该项目的权限")
             return
         if not messagebox.askyesno("确认删除", f"删除 {path}？"):
             return
@@ -275,6 +286,9 @@ class FileSystemGui:
         path = self._selected_path()
         if path is None or self._is_dir(path):
             self._set_status("请选择一个文件创建硬链接")
+            return
+        if not (self._can_write_path(self.current_path) and self._can_execute_path(self.current_path)):
+            self._set_status("当前用户没有在当前目录创建硬链接的权限")
             return
         default = self._default_name(f"{posixpath.basename(path)}-link")
         name = self._ask_name("创建硬链接", "链接名称：", default)
@@ -308,6 +322,9 @@ class FileSystemGui:
         self._show_properties(path)
 
     def _create_default_entry(self, *, is_dir: bool) -> None:
+        if not (self._can_write_path(self.current_path) and self._can_execute_path(self.current_path)):
+            self._set_status("当前用户没有在当前目录中新建项目的权限")
+            return
         default_name = self._default_name("新建文件夹" if is_dir else "新建文件.txt")
         path = self._child_path(default_name)
         ok, _output = self._run(["mkdir" if is_dir else "touch", path])
@@ -508,25 +525,76 @@ class FileSystemGui:
         assert self.root is not None
         menu = tk.Menu(self.root, tearoff=False)
         if is_background:
-            menu.add_command(label="新建文件", command=self.new_file)
-            menu.add_command(label="新建文件夹", command=self.new_dir)
+            can_create = self._can_write_path(self.current_path) and self._can_execute_path(self.current_path)
+            menu.add_command(
+                label="新建文件",
+                command=self.new_file,
+                state=tk.NORMAL if can_create else tk.DISABLED,
+            )
+            menu.add_command(
+                label="新建文件夹",
+                command=self.new_dir,
+                state=tk.NORMAL if can_create else tk.DISABLED,
+            )
             menu.add_separator()
-            menu.add_command(label="搜索此目录", command=self.search)
+            menu.add_command(
+                label="搜索此目录",
+                command=self.search,
+                state=tk.NORMAL if self._can_read_path(self.current_path) else tk.DISABLED,
+            )
             menu.add_command(label="刷新", command=self.refresh)
             menu.tk_popup(event.x_root, event.y_root)
             return
 
         is_dir = bool(target_path and self._is_dir(target_path))
-        menu.add_command(label="打开", command=self.open_selected)
+        parent_path = self._parent_path(target_path) if target_path else self.current_path
+        can_read = bool(target_path and self._can_read_path(target_path))
+        can_write_target = bool(target_path and self._can_write_path(target_path))
+        can_write_parent = self._can_write_path(parent_path) and self._can_execute_path(parent_path)
+        can_create_inside = bool(
+            target_path
+            and is_dir
+            and self._can_write_path(target_path)
+            and self._can_execute_path(target_path)
+        )
+        menu.add_command(
+            label="打开",
+            command=self.open_selected,
+            state=tk.NORMAL if can_read else tk.DISABLED,
+        )
         if not is_dir:
-            menu.add_command(label="编辑", command=self.edit_selected)
-            menu.add_command(label="创建硬链接", command=self.link_selected)
+            menu.add_command(
+                label="编辑",
+                command=self.edit_selected,
+                state=tk.NORMAL if can_read and can_write_target else tk.DISABLED,
+            )
+            menu.add_command(
+                label="创建硬链接",
+                command=self.link_selected,
+                state=tk.NORMAL if can_write_parent else tk.DISABLED,
+            )
         if is_dir:
-            menu.add_command(label="在此目录中新建文件", command=lambda: self._new_inside(target_path, False))
-            menu.add_command(label="在此目录中新建文件夹", command=lambda: self._new_inside(target_path, True))
+            menu.add_command(
+                label="在此目录中新建文件",
+                command=lambda: self._new_inside(target_path, False),
+                state=tk.NORMAL if can_create_inside else tk.DISABLED,
+            )
+            menu.add_command(
+                label="在此目录中新建文件夹",
+                command=lambda: self._new_inside(target_path, True),
+                state=tk.NORMAL if can_create_inside else tk.DISABLED,
+            )
         menu.add_separator()
-        menu.add_command(label="重命名", command=self.rename_selected)
-        menu.add_command(label="删除", command=self.delete_selected)
+        menu.add_command(
+            label="重命名",
+            command=self.rename_selected,
+            state=tk.NORMAL if can_write_parent else tk.DISABLED,
+        )
+        menu.add_command(
+            label="删除",
+            command=self.delete_selected,
+            state=tk.NORMAL if can_write_parent else tk.DISABLED,
+        )
         menu.add_command(
             label="修改权限",
             command=self.chmod_selected,
@@ -732,6 +800,26 @@ class FileSystemGui:
             return True
         except FileSystemError:
             return False
+
+    def _can_read_path(self, path: str) -> bool:
+        return self._can_access_path(path, "r")
+
+    def _can_write_path(self, path: str) -> bool:
+        return self._can_access_path(path, "w")
+
+    def _can_execute_path(self, path: str) -> bool:
+        return self._can_access_path(path, "x")
+
+    def _can_access_path(self, path: str, permission: str) -> bool:
+        try:
+            inode, _dir = self._fs()._resolve_path(path)
+            self._fs()._check_permission(inode, permission)
+            return True
+        except FileSystemError:
+            return False
+
+    def _parent_path(self, path: str) -> str:
+        return posixpath.dirname(path.rstrip("/")) or "/"
 
     def _permission_text(self, stat: dict[str, object]) -> str:
         mode = stat.get("mode", "-")

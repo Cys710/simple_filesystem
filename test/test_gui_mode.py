@@ -96,12 +96,16 @@ class TestGuiModeCommand(unittest.TestCase):
             self.assertTrue(gui._can_manage_users())
             self.assertTrue(gui._can_change_permissions())
 
+            shell.fs.write_file("/readonly.txt", "hello")
+            shell.fs.chmod("/readonly.txt", "64")
             shell.fs.useradd("alice", "alice-pass")
             shell.fs.su("alice", "alice-pass")
             self.assertEqual(
                 gui._permission_text({"mode": "64", "owner_id": 999}),
                 "alice: 可读/不可写",
             )
+            self.assertTrue(gui._can_read_path("/readonly.txt"))
+            self.assertFalse(gui._can_write_path("/readonly.txt"))
             self.assertFalse(gui._can_manage_users())
             self.assertFalse(gui._can_change_permissions())
         finally:
