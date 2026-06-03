@@ -29,6 +29,8 @@ LOGIN_OPTIONAL_COMMANDS = {
     "format",
     "mount",
     "login",
+    "clear",
+    "cls",
 }
 
 try:
@@ -292,6 +294,10 @@ class Shell:
     def _login(self, args: list[str]) -> None:
         self._require_mount()
         self._expect_exact_args(args, 1, "login username")
+
+        if self.fs.current_user is not None:
+            raise FileSystemError("already logged in, use 'su' to switch user")
+
         password = self._read_password("Password: ")
         self.fs.login(args[0], password)
         home_path = self.fs.current_user.home_path if self.fs.current_user is not None else None

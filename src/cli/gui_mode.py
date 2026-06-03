@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Qt graphical mode for the simulated file system.
-
-The GUI is a thin desktop shell around existing commands. It intentionally
-reuses FileSystem and Shell operations so permissions, paths, users and error
-messages stay consistent with command-line mode.
+    模拟文件系统的 Qt 图形界面模式。
+    该 GUI 是对现有命令行功能的轻量级桌面封装。
 """
 
 from __future__ import annotations
@@ -54,9 +51,9 @@ class GuiEntry:
 
 
 class FileSystemGuiError(Exception):
-    """Raised when graphical mode cannot be started."""
+    """GUI 无法启动时抛出此异常"""
 
-
+# GUI 设计
 class FileSystemGui:
     def __init__(
         self,
@@ -89,6 +86,10 @@ class FileSystemGui:
         self.user_label = None
         self.search_edit = None
         self.useradd_action = None
+        self.login_action = None 
+        self.logout_action = None
+        self.su_action = None
+        self.passwd_action = None
 
     def run(self) -> None:
         if self.fs_getter() is None:
@@ -103,6 +104,7 @@ class FileSystemGui:
         self.window.show()
         self.app.exec()
 
+    # UI 环境检查
     def _ensure_qt_available(self) -> None:
         if QtWidgets is None:
             raise FileSystemGuiError(
@@ -117,8 +119,15 @@ class FileSystemGui:
                 "an X server/DISPLAY."
             )
 
+    # UI 构建
     def _build_ui(self) -> None:
         assert self.window is not None
+
+        icon_file = FIGURE_DIR / "文件系统软件图标.svg"
+        if icon_file.exists():
+            self.window.setWindowIcon(QtGui.QIcon(str(icon_file)))
+
+        # CSS 样式
         self.window.setStyleSheet(
             """
             QMainWindow { background: #f4f6f8; }
@@ -127,16 +136,20 @@ class FileSystemGui:
             QHeaderView::section { background: #edf3f8; padding: 6px; border: 0; border-right: 1px solid #d7dee6; }
             QLineEdit { padding: 5px 8px; border: 1px solid #b8c5d1; border-radius: 4px; background: white; }
             QLabel#PathLabel { color: #1f3b57; font-weight: 600; }
+            QTreeWidget::item { height: 32px; }
             """
         )
+        # 菜单和工具栏(TODO)
         self._build_menu()
         self._build_toolbar()
 
+        # 内容放在中间
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(8)
 
+        # 头部 HBOX 布局 显示当前路径和用户信息
         header = QtWidgets.QHBoxLayout()
         self.path_label = QtWidgets.QLabel()
         self.path_label.setObjectName("PathLabel")
@@ -146,29 +159,39 @@ class FileSystemGui:
         header.addWidget(self.user_label)
         layout.addLayout(header)
 
+        # 主体部分左右分割，左侧是目录树，右侧是当前目录的文件列表
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tree.itemSelectionChanged.connect(self._on_tree_select)
+        # 双击树节点也进入目录，但不展开/收起节点(TODO)
         self.tree.itemDoubleClicked.connect(lambda _item, _column: self._open_tree_selection())
         self.tree.customContextMenuRequested.connect(self._on_tree_context)
 
+        # 文件列表使用 QTreeWidget 来显示多列信息
         self.entries = QtWidgets.QTreeWidget()
         self.entries.setColumnCount(6)
         self.entries.setHeaderLabels(["名称", "类型", "大小", "权限", "Owner", "inode"])
         self.entries.setRootIsDecorated(False)
         self.entries.setAlternatingRowColors(True)
         self.entries.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        # 双击文件列表项：如果是目录则进入，否则打开文件
         self.entries.itemDoubleClicked.connect(lambda _item, _column: self.open_selected())
+        # 右键文件列表项显示上下文菜单
         self.entries.customContextMenuRequested.connect(self._on_entry_context)
+        # 重命名处理
         self.entries.itemChanged.connect(self._on_entry_changed)
-        self.entries.setColumnWidth(0, 360)
-        self.entries.setColumnWidth(1, 90)
-        self.entries.setColumnWidth(2, 90)
-        self.entries.setColumnWidth(3, 180)
-        self.entries.setColumnWidth(4, 80)
-        self.entries.setColumnWidth(5, 70)
+
+        # 自适应 
+        header = self.entries.header()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        # 全局最小宽度（所有列不会小于这个值）
+        header.setMinimumSectionSize(80)
+        # 全局最大宽度（所有列不会大于这个值）
+        header.setMaximumSectionSize(300)
+        # 最后一列拉伸（完美布局）
+        header.setSectionResizeMode(5, QtWidgets.QHeaderView.Stretch)
 
         splitter.addWidget(self.tree)
         splitter.addWidget(self.entries)
@@ -178,6 +201,7 @@ class FileSystemGui:
         self.window.setCentralWidget(central)
         self.window.statusBar().showMessage("就绪")
 
+    # 菜单构建
     def _build_menu(self) -> None:
         assert self.window is not None
         menu = self.window.menuBar()
@@ -202,12 +226,18 @@ class FileSystemGui:
         self._add_action(search_menu, "清除搜索", self.clear_search)
 
         user_menu = menu.addMenu("用户")
-        self._add_action(user_menu, "登录...", self.login)
-        self._add_action(user_menu, "注销", self.logout)
-        self._add_action(user_menu, "切换用户...", self.su)
+        # self._add_action(user_menu, "登录...", self.login)
+        # self._add_action(user_menu, "注销", self.logout)
+        # self._add_action(user_menu, "切换用户...", self.su)
+        # self._add_action(user_menu, "修改密码...", self.passwd)
+        self.login_action = self._add_action(user_menu, "登录...", self.login)
+        self.logout_action = self._add_action(user_menu, "注销", self.logout)
+        self.su_action = self._add_action(user_menu, "切换用户...", self.su)
         self.useradd_action = self._add_action(user_menu, "新建用户...", self.useradd)
-        self._add_action(user_menu, "修改密码...", self.passwd)
+        self.passwd_action = self._add_action(user_menu, "修改密码...", self.passwd)
+        
 
+    # 工具栏构建
     def _build_toolbar(self) -> None:
         assert self.window is not None
         toolbar = QtWidgets.QToolBar("文件操作")
@@ -240,6 +270,11 @@ class FileSystemGui:
         clear_action = toolbar.addAction(self._icon_for_action("清除"), "", self.clear_search)
         clear_action.setToolTip("清除")
 
+    """
+        以下是各种操作的实现，包括刷新、文件操作、用户管理等。
+    """
+
+    # 刷新当前目录显示，保持在当前路径
     def refresh(self) -> None:
         if not self._can_show_dir(self.current_path):
             try:
@@ -252,22 +287,26 @@ class FileSystemGui:
         self._refresh_entries()
         self._set_status("已刷新")
 
+    # 挂载磁盘
     def mount_disk(self) -> None:
         path, _filter = QtWidgets.QFileDialog.getOpenFileName(self.window, "选择磁盘镜像")
         if path:
             self._run(["mount", path], refresh_tree=True)
 
+    # 格式化磁盘
     def format_disk(self) -> None:
         path, _filter = QtWidgets.QFileDialog.getSaveFileName(self.window, "格式化磁盘镜像")
         if path and self._confirm("确认格式化", f"格式化会清空磁盘：\n{path}\n是否继续？"):
             self._run(["format", path], refresh_tree=True)
 
+    # 新建文件和文件夹
     def new_file(self) -> None:
         self._create_default_entry(is_dir=False)
 
     def new_dir(self) -> None:
         self._create_default_entry(is_dir=True)
 
+    # 打开文件或进入目录
     def open_selected(self) -> None:
         path = self._selected_path()
         if path is None:
@@ -282,6 +321,7 @@ class FileSystemGui:
         if ok:
             self._show_text(f"查看：{path}", output, readonly=True)
 
+    # 编辑选中的文件
     def edit_selected(self) -> None:
         path = self._selected_path()
         if path is None or self._is_dir(path):
@@ -294,6 +334,7 @@ class FileSystemGui:
         if ok:
             self._show_text(f"编辑：{path}", output, readonly=False, save_path=path)
 
+    # 重命名选中的文件或目录
     def rename_selected(self) -> None:
         path = self._selected_path()
         if path is None or path == "/":
@@ -304,7 +345,9 @@ class FileSystemGui:
             return
         self._begin_inline_rename(path)
 
+    # 删除选中的文件或目录
     def delete_selected(self) -> None:
+
         path = self._selected_path()
         if path is None or path == "/":
             return
@@ -314,13 +357,24 @@ class FileSystemGui:
             return
         if not self._confirm("确认删除", f"删除 {path}？"):
             return
+
         if self._is_dir(path):
-            recursive = self._confirm("目录删除", "是否递归删除该目录？")
-            argv = ["rmdir", "-r", path] if recursive else ["rmdir", path]
+            # 检查目录是否为空
+            if self._is_empty_dir(path):
+                # 空目录 → 直接删除
+                argv = ["rmdir", path]
+            else:
+                # 非空目录 → 提示并确认
+                if not self._confirm("提示", "目录不为空，是否确认删除？"):
+                    return
+                argv = ["rmdir", "-r", path]
         else:
+            # 文件直接删除
             argv = ["rm", path]
+
         self._run(argv)
 
+    # 创建硬链接
     def link_selected(self) -> None:
         path = self._selected_path()
         if path is None or self._is_dir(path):
@@ -334,6 +388,7 @@ class FileSystemGui:
         if name:
             self._run(["ln", path, self._child_path(name)])
 
+    # 修改权限
     def chmod_selected(self) -> None:
         if not self._can_change_permissions():
             self._set_status("只有 root 用户可以修改权限")
@@ -356,10 +411,12 @@ class FileSystemGui:
         if mode:
             self._run(["chmod", mode, path])
 
+    # 显示属性
     def properties_selected(self) -> None:
         path = self._selected_path() or self.current_path
         self._show_properties(path)
 
+    # 搜索当前目录
     def search(self) -> None:
         pattern = self.search_edit.text().strip() if self.search_edit is not None else ""
         if not pattern:
@@ -374,6 +431,7 @@ class FileSystemGui:
         self._refresh_entries(matches)
         self._set_status(f"搜索 {pattern}: {len(matches)} 项")
 
+    # 清除搜索结果，回到正常的目录显示
     def clear_search(self) -> None:
         if self.search_edit is not None:
             self.search_edit.clear()
@@ -381,17 +439,32 @@ class FileSystemGui:
         self._refresh_entries()
         self._set_status("已清除搜索")
 
+    # 进入上一级目录
     def go_up(self) -> None:
         if self.current_path != "/":
             self._run(["cd", posixpath.dirname(self.current_path.rstrip("/")) or "/"])
 
+    # 用户登录
     def login(self) -> None:
-        username = self._ask_text("登录", "用户名：", "")
-        if not username:
+        
+        # 调用双输入弹窗
+        result = self._ask_two_texts(
+            title="登录",
+            label1="用户名：",
+            label2="密码：",
+            password2=True
+        )
+
+        # 用户取消
+        if result is None:
             return
-        password = self._ask_text("登录", "密码：", "", password=True)
-        if password is None:
+
+        username, password = result
+        # 不能为空校验
+        if not username or not password:
+            self._show_error("登录", "用户名和密码不能为空")
             return
+
         self._log_command(["login", username])
         try:
             fs = self._fs()
@@ -404,16 +477,31 @@ class FileSystemGui:
         except FileSystemError as exc:
             self._show_error("login", exc)
 
+    # 用户注销
     def logout(self) -> None:
         self._run(["logout"])
-
+    
+    # 切换用户
     def su(self) -> None:
-        username = self._ask_text("切换用户", "用户名：", "")
-        if not username:
+        # 双输入弹窗：用户名 + 密码
+        result = self._ask_two_texts(
+            title="切换用户",
+            label1="用户名：",
+            label2="密码：",
+            password2=True
+        )
+
+        # 点取消直接退出
+        if result is None:
             return
-        password = self._ask_text("切换用户", "密码：", "", password=True)
-        if password is None:
+
+        username, password = result
+
+        # 校验不能为空
+        if not username or not password:
+            self._show_error("切换用户", "用户名和密码不能为空")
             return
+
         self._log_command(["su", username])
         try:
             self._fs().su(username, password)
@@ -427,12 +515,26 @@ class FileSystemGui:
         if not self._can_manage_users():
             self._set_status("只有 root 用户可以新建用户")
             return
-        username = self._ask_text("新建用户", "用户名：", "")
-        if not username:
+
+        # 双输入弹窗：用户名 + 密码
+        result = self._ask_two_texts(
+            title="新建用户",
+            label1="用户名：",
+            label2="密码：",
+            password2=True
+        )
+
+        # 点取消直接退出
+        if result is None:
             return
-        password = self._ask_text("新建用户", "密码：", "", password=True)
-        if password is None:
+
+        username, password = result
+
+        # 校验不能为空
+        if not username or not password:
+            self._show_error("新建用户", "用户名和密码不能为空")
             return
+
         self._log_command(["useradd", username])
         try:
             self._fs().useradd(username, password)
@@ -441,19 +543,42 @@ class FileSystemGui:
         except FileSystemError as exc:
             self._show_error("useradd", exc)
 
+    # 修改密码
     def passwd(self) -> None:
-        username = self._ask_text("修改密码", "用户名（留空表示当前用户）：", "")
-        password = self._ask_text("修改密码", "新密码：", "", password=True)
-        if password is None:
+         # 获取当前登录用户
+        current_user = self._fs().whoami()
+
+        # 双输入弹窗：用户名（默认当前用户） + 新密码
+        result = self._ask_two_texts(
+            title="修改密码",
+            label1="用户名：",
+            label2="新密码：",
+            initial1=current_user,  # 默认填当前用户
+            password2=True         # 密码框隐藏
+        )
+
+        # 点取消直接退出
+        if result is None:
             return
+
+        username, password = result
+
+        # 密码不能为空
+        if not password:
+            self._show_error("修改密码", "密码不能为空")
+            return
+
         argv = ["passwd"] + ([username] if username else [])
         self._log_command(argv)
         try:
-            self._fs().passwd(username or self._fs().whoami(), password)
+            self._fs().passwd(username or current_user, password)
             self._set_status("密码已更新")
         except FileSystemError as exc:
             self._show_error("passwd", exc)
 
+    """"
+        以下是一些内部工具方法，例如刷新树视图、处理上下文菜单、重命名等。
+    """
     def _create_default_entry(self, *, is_dir: bool) -> None:
         if not (self._can_write_path(self.current_path) and self._can_execute_path(self.current_path)):
             self._set_status("当前用户没有在当前目录中新建项目的权限")
@@ -728,6 +853,54 @@ class FileSystemGui:
             return None
         return value
 
+    # 双输入框的通用函数，适用于登录（用户名+密码）和修改密码（用户名+新密码）
+    def _ask_two_texts(
+        self,
+        title: str,
+        label1: str,
+        label2: str,
+        initial1: str = "",
+        initial2: str = "",
+        password2: bool = False,
+    ) -> tuple[str, str] | None:
+
+        dialog = QtWidgets.QDialog(self.window)
+        dialog.setWindowTitle(title)
+
+        layout = QtWidgets.QFormLayout(dialog)
+
+        # 第一个输入框
+        edit1 = QtWidgets.QLineEdit(initial1)
+        layout.addRow(label1, edit1)
+
+        # 第二个输入框（支持密码模式）
+        edit2 = QtWidgets.QLineEdit(initial2)
+        if password2:
+            edit2.setEchoMode(QtWidgets.QLineEdit.Password)
+        layout.addRow(label2, edit2)
+
+        # 确定 / 取消按钮
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        # 执行弹窗
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return None
+
+        text1 = edit1.text().strip()
+        text2 = edit2.text().strip()
+
+        # 沿用你原来的校验：不能包含 /
+        if "/" in text1 or "/" in text2:
+            self._show_message(title, "名称不能包含 /", error=True)
+            return None
+
+        return (text1, text2)
+
     def _entries(self, path: str) -> list[GuiEntry]:
         try:
             _inode, dir_block = self._fs()._resolve_dir(path)
@@ -861,8 +1034,17 @@ class FileSystemGui:
             self.window.statusBar().showMessage(text)
 
     def _update_user_actions(self) -> None:
+        # 只有 root 用户可以管理用户，所以根据权限启用或禁用相关操作
         if self.useradd_action is not None:
             self.useradd_action.setEnabled(self._can_manage_users())
+        
+        # 登录操作在没有用户登录时可用，注销和切换用户在有用户登录时可用
+        fs = self.fs_getter()
+        is_logged_in = fs is not None and fs.current_user is not None
+        self.login_action.setEnabled(not is_logged_in)
+        self.logout_action.setEnabled(is_logged_in)
+        self.su_action.setEnabled(is_logged_in)
+        self.passwd_action.setEnabled(is_logged_in)
 
     def _is_root_user(self) -> bool:
         fs = self.fs_getter()
@@ -949,3 +1131,11 @@ class FileSystemGui:
             QtWidgets.QMessageBox.critical(self.window, title, text)
         else:
             QtWidgets.QMessageBox.information(self.window, title, text)
+
+    def _is_empty_dir(self, path: str) -> bool:
+        """判断目录是否为空目录"""
+        try:
+            # 直接获取目录下的项目数量
+            return len(self._entries(path)) == 0
+        except FileSystemError:
+            return False

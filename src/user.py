@@ -42,4 +42,4 @@ class User:
 
 
 def create_root_user():
-    return User("root", DEFAULT_ROOT_PASSWORD, 0, "/root")
+    return User("root", DEFAULT_ROOT_PASSWORD, 0, "/")
