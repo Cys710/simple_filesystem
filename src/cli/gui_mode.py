@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from PySide6 import QtCore, QtGui, QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets  
 except ImportError as exc:  # pragma: no cover - depends on local environment
     QtCore = None
     QtGui = None
@@ -28,6 +28,7 @@ else:
 from core.file_system import FileSystem, FileSystemError
 from head import DIR_TYPE, FILE_TYPE
 
+from PySide6.QtGui import QFont
 
 CommandExecutor = Callable[[str], tuple[bool, str]]
 FIGURE_DIR = Path(__file__).resolve().parents[1] / "figure"
@@ -64,6 +65,7 @@ class FileSystemGui:
         command_logger: Callable[[str], None] | None = None,
         error_formatter: Callable[[str, str], str] | None = None,
     ):
+
         self.fs_getter = fs_getter
         self.command_executor = command_executor
         self.disk_path_getter = disk_path_getter
@@ -90,7 +92,7 @@ class FileSystemGui:
         self.logout_action = None
         self.su_action = None
         self.passwd_action = None
-
+   
     def run(self) -> None:
         if self.fs_getter() is None:
             raise FileSystemGuiError("file system is not mounted")
@@ -98,7 +100,7 @@ class FileSystemGui:
         self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
         self.window = QtWidgets.QMainWindow()
         self.window.setWindowTitle(self._window_title())
-        self.window.resize(1160, 680)
+        self.window.resize(1080, 720)
         self._build_ui()
         self.refresh()
         self.window.show()
@@ -139,7 +141,7 @@ class FileSystemGui:
             QTreeWidget::item { height: 32px; }
             """
         )
-        # 菜单和工具栏(TODO)
+        # 菜单和工具栏
         self._build_menu()
         self._build_toolbar()
 
@@ -165,7 +167,7 @@ class FileSystemGui:
         self.tree.setHeaderHidden(True)
         self.tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.tree.itemSelectionChanged.connect(self._on_tree_select)
-        # 双击树节点也进入目录，但不展开/收起节点(TODO)
+        # 双击树节点也进入目录，但不展开/收起节点
         self.tree.itemDoubleClicked.connect(lambda _item, _column: self._open_tree_selection())
         self.tree.customContextMenuRequested.connect(self._on_tree_context)
 
@@ -176,6 +178,9 @@ class FileSystemGui:
         self.entries.setRootIsDecorated(False)
         self.entries.setAlternatingRowColors(True)
         self.entries.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+
+        # 静止手动编辑
+        self.entries.setEditTriggers(QtWidgets.QTreeWidget.NoEditTriggers)
         # 双击文件列表项：如果是目录则进入，否则打开文件
         self.entries.itemDoubleClicked.connect(lambda _item, _column: self.open_selected())
         # 右键文件列表项显示上下文菜单
@@ -226,16 +231,14 @@ class FileSystemGui:
         self._add_action(search_menu, "清除搜索", self.clear_search)
 
         user_menu = menu.addMenu("用户")
-        # self._add_action(user_menu, "登录...", self.login)
-        # self._add_action(user_menu, "注销", self.logout)
-        # self._add_action(user_menu, "切换用户...", self.su)
-        # self._add_action(user_menu, "修改密码...", self.passwd)
         self.login_action = self._add_action(user_menu, "登录...", self.login)
         self.logout_action = self._add_action(user_menu, "注销", self.logout)
         self.su_action = self._add_action(user_menu, "切换用户...", self.su)
         self.useradd_action = self._add_action(user_menu, "新建用户...", self.useradd)
         self.passwd_action = self._add_action(user_menu, "修改密码...", self.passwd)
         
+        menubar = self.window.menuBar()
+        menubar.setNativeMenuBar(False)
 
     # 工具栏构建
     def _build_toolbar(self) -> None:
@@ -625,7 +628,8 @@ class FileSystemGui:
                 "文件夹" if entry.type_id == DIR_TYPE else "文件",
                 self._size_text(stat),
                 self._permission_text(stat),
-                str(stat.get("owner_id", "-")),
+                # str(stat.get("owner_id", "-")),
+                self._get_username(stat.get("owner_id")),
                 str(stat.get("inode_id", "-")),
             ])
             item.setIcon(0, self._folder_icon() if entry.type_id == DIR_TYPE else self._file_icon())
@@ -867,6 +871,7 @@ class FileSystemGui:
         dialog = QtWidgets.QDialog(self.window)
         dialog.setWindowTitle(title)
 
+        dialog.resize(240, 120)  # 宽度，高度
         layout = QtWidgets.QFormLayout(dialog)
 
         # 第一个输入框
@@ -883,6 +888,7 @@ class FileSystemGui:
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
         )
+        buttons.layout().setSpacing(64)  # 数字越大，间距越宽
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addRow(buttons)
@@ -1139,3 +1145,17 @@ class FileSystemGui:
             return len(self._entries(path)) == 0
         except FileSystemError:
             return False
+        
+    def _get_username(self, uid: int | None) -> str:
+        """把用户ID转成用户名"""
+        if uid is None:
+            return "-"
+        
+        fs = self._fs()
+        # 遍历用户字典，通过 uid 找对应用户名
+        for username, user_obj in fs.super_block.users.items():
+            if user_obj.user_id == uid:
+                return username
+        
+        # 找不到就返回 uid 数字
+        return str(uid)

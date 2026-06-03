@@ -1,5 +1,5 @@
 """
-    主要的数据结构
+    主要超级块 + 目录块
 """
 import time
 
@@ -145,10 +145,6 @@ class DirBlock(Block):
             self.son_dirs.pop(name)
             self.counts -= 1
 
-    # def file_name_and_types(self):
-    #     return [(key, DIR_TYPE) for key in self.son_dirs.keys()] \
-    #            + [(key, FILE_TYPE) for key in self.son_files.keys()]
-
     def file_name_and_types(self):
 
         dirs = [(BLUE + name + RESET, DIR_TYPE) for name in self.son_dirs]
@@ -168,22 +164,6 @@ class DirBlock(Block):
             return DIR_TYPE
         if name not in self.son_dirs and name not in self.son_files:
             return -1
-        
-    # def get_dir(self, dir_name):
-    #     """
-    #     获取对应目录的inode_id
-    #     :param dir_name:
-    #     :return:
-    #     """
-    #     return self.son_dirs.get(dir_name)
-
-    # def get_file(self, file_name):
-    #     """
-    #     获取对应文件的inode_id
-    #     :param file_name:
-    #     :return:
-    #     """
-    #     return self.son_files.get(file_name)
 
     # def get_all_son_inode(self) -> list:
     #     """

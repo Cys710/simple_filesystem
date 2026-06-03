@@ -50,9 +50,3 @@ def mount(path: str | Path = DISK_NAME) -> MountedFileSystem:
         root_inode=root_inode,
         root_dir=root_dir,
     )
-
-# # 初始化磁盘镜像，创建一个新的磁盘文件，并挂在载它
-# def init(path: str | Path = DISK_NAME) -> MountedFileSystem:
-
-#     format_disk(path)
-#     return mount(path)
