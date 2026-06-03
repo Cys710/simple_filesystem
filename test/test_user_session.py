@@ -10,7 +10,7 @@ SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
 
 from core.file_system import FileSystem, FileSystemError
-from head import ROOT_ID
+from head import ROOT_ID, MAX_USER_COUNT
 from user import DEFAULT_ROOT_PASSWORD
 
 
@@ -209,6 +209,19 @@ class TestUserSession(unittest.TestCase):
             fs.su("bob", "bob-pass")
             with self.assertRaises(FileSystemError):
                 fs.chmod("/home/alice/note.txt", "77")
+        finally:
+            temp_dir.cleanup()
+
+    def test_useradd_rejects_when_user_limit_is_reached(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.login("root", DEFAULT_ROOT_PASSWORD)
+            for index in range(1, MAX_USER_COUNT):
+                fs.useradd(f"user{index}", "pass")
+
+            self.assertEqual(len(fs.users()), MAX_USER_COUNT)
+            with self.assertRaisesRegex(FileSystemError, f"max {MAX_USER_COUNT} users"):
+                fs.useradd("overflow", "pass")
         finally:
             temp_dir.cleanup()
 

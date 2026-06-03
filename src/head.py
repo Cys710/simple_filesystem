@@ -47,6 +47,9 @@ FREE_BLOCK_CNT = 50   # 一组块的数量
 # 内存 inode 表配置
 INODE_HASH_BUCKETS = 128
 MEMORY_INODE_LIMIT = 128
+# 设置用户和目录的限制
+MAX_USER_COUNT = 32
+MAX_DIR_ENTRY_COUNT = 128
 
 # 根目录ID
 ROOT_ID = -1
@@ -73,12 +76,6 @@ LOGO = r"""
 /_/    /_/     /____/
                        
 """
-
-# 颜色
-FILE_COLOR_F = "37"   # 文件：白色
-FILE_COLOR_B = "40"
-DIR_COLOR_F = "32"    # 目录：绿色
-DIR_COLOR_B = "40"
 
 BLUE = "\033[1;34;40m"      # 亮蓝      (目录)
 GREEN = "\033[1;32m"        # 亮绿色    (命令行头)

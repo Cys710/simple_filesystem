@@ -111,6 +111,7 @@ class FileSystem:
         if not name:
             raise FileSystemError("directory name cannot be empty")
         self._ensure_name_available(parent_dir, name)
+        self._ensure_dir_entry_capacity(parent_dir)
         self._check_permission(parent_inode, "w")
         self._check_permission(parent_inode, "x")
 
@@ -144,6 +145,7 @@ class FileSystem:
         if not name:
             raise FileSystemError("file name cannot be empty")
         self._ensure_name_available(parent_dir, name)
+        self._ensure_dir_entry_capacity(parent_dir)
         self._check_permission(parent_inode, "w")
         self._check_permission(parent_inode, "x")
 
@@ -201,6 +203,7 @@ class FileSystem:
         self._validate_username(username)
         if username in self.super_block.users:
             raise FileSystemError(f"user already exists: {username}")
+        self._ensure_user_capacity()
 
         user_id = self._next_user_id()
         home_path = f"/home/{username}"
@@ -311,6 +314,7 @@ class FileSystem:
         if not name:
             raise FileSystemError("link name cannot be empty")
         self._ensure_name_available(parent_dir, name)
+        self._ensure_dir_entry_capacity(parent_dir)
         self._check_permission(parent_inode, "w")
         self._check_permission(parent_inode, "x")
 
@@ -514,6 +518,8 @@ class FileSystem:
         # 检查目标父目录写入和执行权限
         self._check_permission(dst_parent_inode, "w")
         self._check_permission(dst_parent_inode, "x")
+        if dst_name not in dst_parent_dir.son_files:
+            self._ensure_dir_entry_capacity(dst_parent_dir)
 
         # 检查目标是否已存在
         if dst_name in dst_parent_dir.son_files:
@@ -587,6 +593,8 @@ class FileSystem:
         # 如果源和目标相同，直接返回
         if src_parent_inode.inode_id == dst_parent_inode.inode_id and src_name == dst_name:
             return
+        if src_parent_inode.inode_id != dst_parent_inode.inode_id and dst_name not in dst_parent_dir.son_files:
+            self._ensure_dir_entry_capacity(dst_parent_dir)
 
         # 检查目标是否已存在
         if dst_name in dst_parent_dir.son_files:
@@ -812,6 +820,17 @@ class FileSystem:
             user_id += 1
         return user_id
 
+    def _ensure_user_capacity(self) -> None:
+        if len(self.super_block.users) >= MAX_USER_COUNT:
+            raise FileSystemError(f"user limit reached: max {MAX_USER_COUNT} users")
+
+    def _ensure_dir_entry_capacity(self, dir_block: DirBlock) -> None:
+        entry_count = len(dir_block.son_files) + len(dir_block.son_dirs)
+        if entry_count >= MAX_DIR_ENTRY_COUNT:
+            raise FileSystemError(
+                f"directory entry limit reached: max {MAX_DIR_ENTRY_COUNT} entries"
+            )
+    
     # 确保目录存在，如果不存在则创建
     def _ensure_dir_exists(self, path: str) -> None:
         try:

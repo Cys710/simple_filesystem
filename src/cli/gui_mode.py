@@ -28,8 +28,6 @@ else:
 from core.file_system import FileSystem, FileSystemError
 from head import DIR_TYPE, FILE_TYPE
 
-from PySide6.QtGui import QFont
-
 CommandExecutor = Callable[[str], tuple[bool, str]]
 FIGURE_DIR = Path(__file__).resolve().parents[1] / "figure"
 ACTION_ICON_FILES = {

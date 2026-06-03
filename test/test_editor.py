@@ -199,11 +199,12 @@ class TestVimEditorPersistence(unittest.TestCase):
             output = io.StringIO()
             shell = Shell(output=output)
             shell.fs = fs
+            shell.fs.login("root", DEFAULT_ROOT_PASSWORD)
 
             with patch("cli.editor.sys.stdin.isatty", return_value=False):
                 shell.execute("vim /note.txt")
 
-            self.assertIn("error: vim requires an interactive terminal", output.getvalue())
+            self.assertIn("vim: vim requires an interactive terminal", output.getvalue())
         finally:
             temp_dir.cleanup()
 

@@ -9,7 +9,7 @@ SRC = os.path.join(PROJECT_ROOT, "src")
 
 sys.path.insert(0, SRC)
 
-from head import BLOCK_SIZE, DIRECT_CNT
+from head import BLOCK_SIZE, DIRECT_CNT, MAX_DIR_ENTRY_COUNT
 from storage.object_io import pack_object
 from core.file_system import FileSystem, FileSystemError, MAX_INDIRECT_BLOCK_IDS
 from user import DEFAULT_ROOT_PASSWORD
@@ -413,6 +413,58 @@ class TestFileCommands(unittest.TestCase):
 
             self.assertEqual(fs.super_block.free_inode_cnt, before)
             self.assertEqual(fs.ls("/"), [])
+        finally:
+            temp_dir.cleanup()
+
+    def test_touch_rejects_when_directory_entry_limit_is_reached(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            for index in range(MAX_DIR_ENTRY_COUNT):
+                fs.touch(f"/file{index}.txt")
+
+            with self.assertRaisesRegex(FileSystemError, f"max {MAX_DIR_ENTRY_COUNT} entries"):
+                fs.touch("/overflow.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_link_rejects_when_directory_entry_limit_is_reached(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.touch("/source.txt")
+            for index in range(MAX_DIR_ENTRY_COUNT - 1):
+                fs.touch(f"/file{index}.txt")
+
+            with self.assertRaisesRegex(FileSystemError, f"max {MAX_DIR_ENTRY_COUNT} entries"):
+                fs.link("/source.txt", "/source-link.txt")
+        finally:
+            temp_dir.cleanup()
+
+    def test_cp_rejects_when_destination_directory_entry_limit_is_reached(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.mkdir("/dst")
+            fs.touch("/source.txt")
+            fs.write_file("/source.txt", "hello")
+            for index in range(MAX_DIR_ENTRY_COUNT):
+                fs.touch(f"/dst/file{index}.txt")
+
+            with self.assertRaisesRegex(FileSystemError, f"max {MAX_DIR_ENTRY_COUNT} entries"):
+                fs.cp("/source.txt", "/dst")
+        finally:
+            temp_dir.cleanup()
+
+    def test_mv_rejects_when_destination_directory_entry_limit_is_reached(self):
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.mkdir("/src")
+            fs.mkdir("/dst")
+            fs.touch("/src/source.txt")
+            fs.write_file("/src/source.txt", "hello")
+            for index in range(MAX_DIR_ENTRY_COUNT):
+                fs.touch(f"/dst/file{index}.txt")
+
+            with self.assertRaisesRegex(FileSystemError, f"max {MAX_DIR_ENTRY_COUNT} entries"):
+                fs.mv("/src/source.txt", "/dst")
         finally:
             temp_dir.cleanup()
 

@@ -18,6 +18,7 @@ from cli.visualizer import DiskVisualizer
 from core.debug_info import FileSystemInspector
 from core.file_system import FileSystem
 from head import BLOCK_SIZE, DATA_BLOCK_NUM, DATA_BLOCK_START_ID, DIRECT_CNT
+from user import DEFAULT_ROOT_PASSWORD
 
 
 class TestFileSystemInspector(unittest.TestCase):
@@ -116,8 +117,13 @@ class TestDiskMonitorCommands(unittest.TestCase):
         temp_dir = tempfile.TemporaryDirectory()
         disk_path = os.path.join(temp_dir.name, "disk.img")
         output = io.StringIO()
-        shell = Shell(disk_path, output=output)
+        shell = Shell(
+            disk_path,
+            password_func=lambda _prompt: DEFAULT_ROOT_PASSWORD,
+            output=output,
+        )
         shell.execute("format")
+        shell.execute("login root")
         return temp_dir, shell, output
 
     def test_monitor_local_commands_switch_views(self):
@@ -370,7 +376,7 @@ class TestDiskMonitorCommands(unittest.TestCase):
                 shell.execute("monitor")
 
             self.assertIn(
-                "error: monitor requires an interactive terminal",
+                "monitor: monitor requires an interactive terminal",
                 output.getvalue(),
             )
         finally:
