@@ -166,7 +166,7 @@ class Shell:
                 self._cat(args)
             elif cmd == "vim":
                 self._vim(args)
-            elif cmd in {"monitor", "visual", "visualize"}:
+            elif cmd == "monitor":
                 self._monitor(args)
             elif cmd == "gui":
                 self._gui(args)
@@ -460,7 +460,7 @@ class Shell:
             return f"error: {exc}"
         if not argv:
             return ""
-        if argv[0] in {"format", "mount", "monitor", "visual", "visualize", "gui", "vim", "clear", "cls"}:
+        if argv[0] in {"format", "mount", "monitor", "gui", "vim", "clear", "cls"}:
             return f"error: {argv[0]} is unavailable inside monitor"
 
         old_output = self.output
@@ -482,7 +482,7 @@ class Shell:
             return False, f"error: {exc}"
         if not argv:
             return True, ""
-        if argv[0] in {"gui", "monitor", "visual", "visualize", "vim", "clear", "cls", "exit", "quit"}:
+        if argv[0] in {"gui", "monitor", "vim", "clear", "cls", "exit", "quit"}:
             return False, f"error: {argv[0]} is unavailable inside gui"
 
         self._log_gui_command(command)
@@ -695,7 +695,6 @@ class Shell:
         " cat file\n" \
         " vim file\n" \
         " monitor\n" \
-        " visual\n" \
         " gui\n" \
         " open file [mode]\n" \
         " read fd [size]\n" \
@@ -839,8 +838,6 @@ class Shell:
             "whoami",
             "users",
             "monitor",
-            "visual",
-            "visualize",
             "gui",
             "pwd",
             "clear",

@@ -52,8 +52,6 @@ SHELL_COMMANDS = (
     "touch",
     "useradd",
     "users",
-    "visual",
-    "visualize",
     "vim",
     "who",
     "whoami",
