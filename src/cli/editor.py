@@ -12,8 +12,35 @@ from core.file_system import FileSystem, FileSystemError
 
 
 NORMAL = "NORMAL"
+"""
+方向键 或 h/j/k/l 移动
+i 进入插入模式
+a 光标后移一格再进入插入模式?
+o 在下方开新行
+O 在上方开新行
+x 删除字符
+d 删除整行
+: 进入命令模式
+Ctrl-S 保存
+"""
+
 INSERT = "INSERT"
+"""
+普通可打印字符会插入文本
+Enter 换行
+Backspace 删除
+方向键移动
+Esc 回到普通模式
+"""
+
 COMMAND = "COMMAND"
+"""
+:w 保存
+:q 退出，如果有未保存修改会阻止
+:q! 强制退出
+:wq 或 :x 保存并退出
+:数字 跳转到指定行
+"""
 
 ESCAPE_KEY_SEQUENCES = {
     "\x1b[A": curses.KEY_UP,
