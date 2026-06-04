@@ -45,6 +45,7 @@ class TextBuffer:
     cursor_x: int = 0
     modified: bool = False
 
+    # 从完整文本创建按行存储的文本缓冲区。
     @classmethod
     def from_text(cls, text: str) -> "TextBuffer":
         lines = text.split("\n")
@@ -52,17 +53,21 @@ class TextBuffer:
             lines = [""]
         return cls(lines=lines)
 
+    # 将缓冲区内容重新拼接成完整文本。
     def to_text(self) -> str:
         return "\n".join(self.lines)
 
+    # 返回光标当前所在行的文本。
     @property
     def current_line(self) -> str:
         return self.lines[self.cursor_y]
 
+    # 将光标限制在现有行列范围内。
     def clamp_cursor(self) -> None:
         self.cursor_y = min(max(self.cursor_y, 0), len(self.lines) - 1)
         self.cursor_x = min(max(self.cursor_x, 0), len(self.current_line))
 
+    # 将光标向左移动，必要时跳到上一行末尾。
     def move_left(self) -> None:
         if self.cursor_x > 0:
             self.cursor_x -= 1
@@ -70,6 +75,7 @@ class TextBuffer:
             self.cursor_y -= 1
             self.cursor_x = len(self.current_line)
 
+    # 将光标向右移动，必要时跳到下一行开头。
     def move_right(self) -> None:
         if self.cursor_x < len(self.current_line):
             self.cursor_x += 1
@@ -77,22 +83,26 @@ class TextBuffer:
             self.cursor_y += 1
             self.cursor_x = 0
 
+    # 将光标向上移动并保持列位置有效。
     def move_up(self) -> None:
         if self.cursor_y > 0:
             self.cursor_y -= 1
             self.clamp_cursor()
 
+    # 将光标向下移动并保持列位置有效。
     def move_down(self) -> None:
         if self.cursor_y < len(self.lines) - 1:
             self.cursor_y += 1
             self.clamp_cursor()
 
+    # 在当前光标位置插入一个字符。
     def insert_char(self, char: str) -> None:
         line = self.current_line
         self.lines[self.cursor_y] = line[: self.cursor_x] + char + line[self.cursor_x :]
         self.cursor_x += len(char)
         self.modified = True
 
+    # 在当前光标位置拆分当前行并插入新行。
     def insert_newline(self) -> None:
         line = self.current_line
         before = line[: self.cursor_x]
@@ -103,17 +113,20 @@ class TextBuffer:
         self.cursor_x = 0
         self.modified = True
 
+    # 在当前行下方创建一个空行并移动光标。
     def open_line_below(self) -> None:
         self.cursor_y += 1
         self.lines.insert(self.cursor_y, "")
         self.cursor_x = 0
         self.modified = True
 
+    # 在当前行上方创建一个空行并移动光标。
     def open_line_above(self) -> None:
         self.lines.insert(self.cursor_y, "")
         self.cursor_x = 0
         self.modified = True
 
+    # 删除光标左侧字符，行首时合并到上一行。
     def backspace(self) -> None:
         if self.cursor_x > 0:
             line = self.current_line
@@ -132,6 +145,7 @@ class TextBuffer:
         self.cursor_x = previous_len
         self.modified = True
 
+    # 删除光标处字符，行尾时合并下一行。
     def delete_char(self) -> None:
         line = self.current_line
         if self.cursor_x < len(line):
@@ -144,6 +158,7 @@ class TextBuffer:
             del self.lines[self.cursor_y + 1]
             self.modified = True
 
+    # 删除当前行并修正光标位置。
     def delete_line(self) -> None:
         if len(self.lines) == 1:
             self.lines[0] = ""
@@ -153,6 +168,7 @@ class TextBuffer:
             self.clamp_cursor()
         self.modified = True
 
+    # 跳转到指定行号并修正光标位置。
     def goto_line(self, line_number: int) -> None:
         if line_number < 1:
             line_number = 1
@@ -161,6 +177,7 @@ class TextBuffer:
 
 
 class VimEditor:
+    # 初始化编辑器状态并绑定文件系统路径。
     def __init__(self, fs: FileSystem, path: str):
         self.fs = fs
         self.path = path
@@ -175,6 +192,7 @@ class VimEditor:
         self.text_height = 1
         self.screen_width = 1
 
+    # 从文件系统读取文件内容到文本缓冲区。
     def load(self) -> None:
         try:
             data = self.fs.read_file(self.path)
@@ -192,6 +210,7 @@ class VimEditor:
         self.buffer.modified = False
         self.message = f'"{self.path}" {len(data)} bytes'
 
+    # 将文本缓冲区内容写回文件系统。
     def save(self) -> None:
         if not self.file_exists:
             self.fs.touch(self.path)
@@ -202,12 +221,14 @@ class VimEditor:
         self.buffer.modified = False
         self.message = f'"{self.path}" written {written} bytes'
 
+    # 加载文件并启动 curses 全屏编辑循环。
     def run(self) -> None:
         self.load()
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise VimEditorError("vim requires an interactive terminal")
         curses.wrapper(self._run_screen)
 
+    # 配置 curses 屏幕并持续读取按键。
     def _run_screen(self, stdscr) -> None:
         try:
             curses.curs_set(1)
@@ -229,6 +250,7 @@ class VimEditor:
             key = self._read_key(stdscr)
             self._handle_key(key)
 
+    # 根据当前模式分发按键处理逻辑。
     def _handle_key(self, key) -> None:
         if key == curses.KEY_MOUSE:
             self._handle_mouse_key()
@@ -240,6 +262,7 @@ class VimEditor:
         else:
             self._handle_normal_key(key)
 
+    # 处理普通模式下的移动、编辑和命令入口按键。
     def _handle_normal_key(self, key) -> None:
         if key in (curses.KEY_LEFT, "h"):
             self.buffer.move_left()
@@ -274,6 +297,7 @@ class VimEditor:
         elif key == "\x13":
             self.save()
 
+    # 处理插入模式下的输入、删除、换行和退出按键。
     def _handle_insert_key(self, key) -> None:
         if key == "\x1b":
             self.mode = NORMAL
@@ -293,6 +317,7 @@ class VimEditor:
         elif isinstance(key, str) and key.isprintable():
             self.buffer.insert_char(key)
 
+    # 处理命令模式下的命令编辑和执行按键。
     def _handle_command_key(self, key) -> None:
         if key == "\x1b":
             self.mode = NORMAL
@@ -308,6 +333,7 @@ class VimEditor:
         elif isinstance(key, str) and key.isprintable():
             self.command += key
 
+    # 执行保存、退出和跳转行号等冒号命令。
     def _execute_command(self, command: str) -> None:
         if command == "w":
             self.save()
@@ -326,6 +352,7 @@ class VimEditor:
         else:
             self.message = f"Not an editor command: {command}"
 
+    # 重绘文本区域、状态栏、命令栏和终端光标。
     def _draw(self, stdscr) -> None:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
@@ -355,6 +382,7 @@ class VimEditor:
         stdscr.move(cursor_y, cursor_x)
         stdscr.refresh()
 
+    # 根据光标位置更新行列滚动偏移。
     def _scroll_to_cursor(self, text_height: int, width: int) -> None:
         if self.buffer.cursor_y < self.row_offset:
             self.row_offset = self.buffer.cursor_y
@@ -366,6 +394,7 @@ class VimEditor:
         elif self.buffer.cursor_x >= self.col_offset + width:
             self.col_offset = self.buffer.cursor_x - width + 1
 
+    # 绘制包含模式、文件名和光标位置的状态栏。
     def _draw_status(self, stdscr, y: int, width: int) -> None:
         dirty = "[+]" if self.buffer.modified else ""
         left = f" {self.mode} {dirty} {self.path}"
@@ -374,6 +403,7 @@ class VimEditor:
         status = (left + " " * gap + right)[:width]
         self._addnstr(stdscr, y, 0, status.ljust(width), width, curses.A_REVERSE)
 
+    # 绘制命令输入行或普通消息提示。
     def _draw_command_line(self, stdscr, y: int, width: int) -> None:
         if self.mode == COMMAND:
             text = ":" + self.command
@@ -381,12 +411,14 @@ class VimEditor:
             text = self.message
         self._addnstr(stdscr, y, 0, text.ljust(width), width)
 
+    # 安全写入 curses 文本，忽略边界导致的绘制异常。
     def _addnstr(self, stdscr, y: int, x: int, text: str, n: int, attr: int = 0) -> None:
         try:
             stdscr.addnstr(y, x, text, n, attr)
         except curses.error:
             pass
 
+    # 读取一次按键并归一化特殊键序列。
     def _read_key(self, stdscr):
         key = stdscr.get_wch()
         if key == curses.KEY_MOUSE:
@@ -399,10 +431,12 @@ class VimEditor:
             return self._read_windows_special_key(stdscr, key)
         return key
 
+    # 读取并解析 ESC 开头的终端方向键序列。
     def _read_escape_sequence(self, stdscr):
         sequence = "\x1b" + self._drain_pending_input(stdscr)
         return ESCAPE_KEY_SEQUENCES.get(sequence, "\x1b")
 
+    # 读取并解析 Windows 风格特殊键序列。
     def _read_windows_special_key(self, stdscr, prefix: str):
         try:
             next_key = stdscr.get_wch()
@@ -412,6 +446,7 @@ class VimEditor:
             return WINDOWS_SPECIAL_KEY_SEQUENCES.get(next_key, prefix + next_key)
         return next_key
 
+    # 临时切换非阻塞模式以读取后续已到达的输入。
     def _drain_pending_input(self, stdscr, *, limit: int = 8) -> str:
         chunks: list[str] = []
         stdscr.nodelay(True)
@@ -428,6 +463,7 @@ class VimEditor:
             stdscr.nodelay(False)
         return "".join(chunks)
 
+    # 处理鼠标点击并把光标移动到对应文本位置。
     def _handle_mouse_key(self) -> None:
         try:
             _device_id, mouse_x, mouse_y, _z, button_state = curses.getmouse()

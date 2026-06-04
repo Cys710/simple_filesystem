@@ -1,5 +1,5 @@
 """
-    Text renderers for the full-screen file-system monitor.
+    文本渲染器，用于全屏文件系统监视器。
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ ROLE_SYMBOL = {
 
 
 class DiskVisualizer:
+    # 渲染内存中缓存 inode 的哈希链表状态。
     def render_memory_inodes(self, info: MemoryInodeDebugInfo) -> list[str]:
         lines = [
             "Hash chains for cached inodes",
@@ -55,6 +56,7 @@ class DiskVisualizer:
         ])
         return lines
 
+    # 渲染 inode 位图，按行显示目录、文件和空闲状态。
     def render_inode_bitmap(
         self,
         info: InodeBitmapDebugInfo,
@@ -80,6 +82,7 @@ class DiskVisualizer:
         ])
         return lines
 
+    # 渲染空闲块分组栈和横向分组链。
     def render_free_groups(self, info: FreeGroupsDebugInfo) -> list[str]:
         lines = [
             "Current free stack in super block:",
@@ -107,6 +110,7 @@ class DiskVisualizer:
             lines.extend(f"! {message}" for message in info.inconsistencies)
         return lines
 
+    # 渲染磁盘块布局和每个块的角色符号。
     def render_block_map(
         self,
         info: BlockMapDebugInfo,
@@ -141,6 +145,7 @@ class DiskVisualizer:
             lines.extend(f"! {message}" for message in info.inconsistencies)
         return lines
 
+    # 渲染单个文件 inode 到直接块和一级间接块的索引关系。
     def render_file_index(self, info: FileIndexDebugInfo) -> list[str]:
         lines = [
             f"File: {info.path}",
@@ -181,6 +186,7 @@ class DiskVisualizer:
         ])
         return lines
 
+    # 渲染监视器首页使用的多个概要面板。
     def render_overview(
         self,
         inode_info: InodeBitmapDebugInfo,
@@ -223,6 +229,7 @@ class DiskVisualizer:
             ("Free Groups", group_lines),
         ]
 
+    # 将多个空闲块分组卡片横向连接成链式视图。
     def _render_horizontal_groups(self, groups: list[FreeGroupEntry]) -> list[str]:
         if not groups:
             return ["[ empty ]"]
@@ -244,6 +251,7 @@ class DiskVisualizer:
         lines.append(" " * 12 + "chain end: stack[0] == 0")
         return lines
 
+    # 生成单个空闲块分组卡片的正文内容。
     def _group_card_body(self, group: FreeGroupEntry) -> list[str]:
         width = 32
         inner = width - 2
@@ -259,6 +267,7 @@ class DiskVisualizer:
             *value_lines,
         ]
 
+    # 给卡片正文添加固定宽度的文本边框。
     def _box_card(self, body: list[str], body_height: int) -> list[str]:
         width = 32
         inner = width - 2
@@ -269,11 +278,14 @@ class DiskVisualizer:
             "└" + "─" * inner + "┘",
         ]
 
+    # 将 inode 类型转换成位图中使用的单字符符号。
     def _inode_symbol(self, kind: str) -> str:
         return {"DIR": "D", "FILE": "F", "FREE": "."}.get(kind, "?")
 
+    # 格式化数据块编号和对应的磁盘块编号。
     def _block_target(self, data_block_id: int) -> str:
         return f"data block {data_block_id}  (disk {DATA_BLOCK_START_ID + data_block_id})"
 
+    # 格式化一级间接索引块编号和对应的磁盘块编号。
     def _index_target(self, data_block_id: int) -> str:
         return f"index block {data_block_id}  (disk {DATA_BLOCK_START_ID + data_block_id})"
