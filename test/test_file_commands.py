@@ -107,13 +107,37 @@ class TestFileCommands(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
-    def test_cp_rejects_directory_source(self):
-        """cp: 源为目录应报错。"""
+    def test_cp_copies_directory_tree(self):
+        """cp: 递归复制目录，保留目录结构。"""
         temp_dir, _disk_path, fs = self.make_fs()
         try:
             fs.mkdir("/dir")
-            with self.assertRaises(FileSystemError):
-                fs.cp("/dir", "/copy")
+            fs.mkdir("/dir/sub")
+            fs.touch("/dir/a.txt")
+            fs.write_file("/dir/a.txt", "hello")
+            fs.touch("/dir/sub/b.txt")
+            fs.write_file("/dir/sub/b.txt", "world")
+
+            fs.cp("/dir", "/copy")
+
+            self.assertEqual(fs.read_file("/copy/a.txt"), b"hello")
+            self.assertEqual(fs.read_file("/copy/sub/b.txt"), b"world")
+            self.assertEqual(fs.read_file("/dir/a.txt"), b"hello")
+        finally:
+            temp_dir.cleanup()
+
+    def test_cp_copies_directory_into_existing_directory(self):
+        """cp: 复制目录到已存在目录下，应创建同名子目录。"""
+        temp_dir, _disk_path, fs = self.make_fs()
+        try:
+            fs.mkdir("/dir1")
+            fs.touch("/dir1/a.txt")
+            fs.write_file("/dir1/a.txt", "hello")
+            fs.mkdir("/dst")
+
+            fs.cp("/dir1", "/dst")
+
+            self.assertEqual(fs.read_file("/dst/dir1/a.txt"), b"hello")
         finally:
             temp_dir.cleanup()
 
@@ -210,13 +234,21 @@ class TestFileCommands(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
-    def test_mv_rejects_directory_source(self):
-        """mv: 源为目录应报错。"""
+    def test_mv_moves_directory(self):
+        """mv: 支持移动目录（跨目录）。"""
         temp_dir, _disk_path, fs = self.make_fs()
         try:
-            fs.mkdir("/dir")
+            fs.mkdir("/dir1")
+            fs.mkdir("/dir1/sub")
+            fs.touch("/dir1/sub/a.txt")
+            fs.write_file("/dir1/sub/a.txt", "hello")
+            fs.mkdir("/dir2")
+
+            fs.mv("/dir1/sub", "/dir2")
+
+            self.assertEqual(fs.read_file("/dir2/sub/a.txt"), b"hello")
             with self.assertRaises(FileSystemError):
-                fs.mv("/dir", "/dir2")
+                fs._resolve_dir("/dir1/sub")
         finally:
             temp_dir.cleanup()
 
