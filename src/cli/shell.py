@@ -21,6 +21,9 @@ from cli.encoding import configure_terminal_encoding
 from utils import INDIRECT_INDEX_TEST_BYTES, append_test_data, logo
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CYAN = "\033[1;36m"
+YELLOW = "\033[1;33m"
+DIM = "\033[2m"
 LOGIN_OPTIONAL_COMMANDS = {
     "bash",
     "exit",
@@ -678,49 +681,75 @@ class Shell:
 
     # _help 输出可用命令的帮助信息。
     def _help(self) -> None:
-        self._println("commands: \n" \
-        " format [disk]\n" \
-        " mount [disk]\n" \
-        " login username\n" \
-        " ls [path]\n" \
-        " mkdir dir_name\n" \
-        " touch file_name\n" \
-        " logout\n" \
-        " whoami\n" \
-        " who\n" \
-        " useradd username\n" \
-        " passwd [username]\n" \
-        " users\n" \
-        " su username\n" \
-        " chmod mode path\n" \
-        " stat path\n" \
-        " tree [path]\n" \
-        " find [path] pattern\n" \
-        " ln source target\n" \
-        " bash script.sh\n" \
-        " cat file\n" \
-        " vim file\n" \
-        " monitor\n" \
-        " gui\n" \
-        " open file [mode]\n" \
-        " read fd [size]\n" \
-        " write file text\n" \
-        " write fd text\n" \
-        " seek fd offset [whence]\n" \
-        " close fd\n" \
-        " append file text\n" \
-        " fill file [bytes]\n" \
-        " cp [-f] source destination\n" \
-        " mv [-f] source destination\n" \
-        " rename [-f] old_name new_name\n" \
-        " rm file\n" \
-        " rmdir [-r] directory\n" \
-        " cd path\n" \
-        " pwd\n" \
-        " clear\n" \
-        " exit")
+        sections = [
+            ("System", [
+                "format [disk]",
+                "mount [disk]",
+                "bash script.sh",
+                "exit",
+            ]),
+            ("Directory", [
+                "ls [path]",
+                "mkdir dir_name",
+                "rmdir [-r] directory",
+                "cd path",
+                "pwd",
+                "tree [path]",
+                "find [path] pattern",
+            ]),
+            ("File", [
+                "touch file_name",
+                "cat file",
+                "vim file",
+                "cp [-f] source destination",
+                "mv [-f] source destination",
+                "rename [-f] old_name new_name",
+                "rm file",
+                "ln source target",
+                "stat path",
+                "fill file [bytes]",
+            ]),
+            ("Open File", [
+                "open file [mode]",
+                "read fd [size]",
+                "write file text",
+                "write fd text",
+                "append file text",
+                "seek fd offset [whence]",
+                "close fd",
+            ]),
+            ("User", [
+                "login username",
+                "logout",
+                "whoami",
+                "who",
+                "useradd username",
+                "passwd [username]",
+                "users",
+                "su username",
+                "chmod mode path",
+            ]),
+            ("View", [
+                "monitor",
+                "gui",
+                "clear",
+            ]),
+        ]
+
+        self._println(f"{CYAN}Available commands{RESET}")
+        for title, commands in sections:
+            self._println(f"\n{YELLOW}{title}{RESET}")
+            for command in commands:
+                self._println(f"  {self._format_help_command(command)}")
+        return
 
     # _expect_exact_args 检查参数数量是否与预期完全匹配，否则抛出错误并显示用法。
+    def _format_help_command(self, usage: str) -> str:
+        command, _, args = usage.partition(" ")
+        if not args:
+            return f"{GREEN}{command}{RESET}"
+        return f"{GREEN}{command}{RESET} {DIM}{args}{RESET}"
+
     def _expect_exact_args(self, args: list[str], count: int, usage: str) -> None:
         if len(args) != count:
             raise FileSystemError(f"Parameternotmatch: {usage}")
