@@ -23,6 +23,7 @@ from storage.inode_io import read_inode
 from storage.object_io import read_object
 
 
+# 表示 inode 位图中的单个 inode 调试条目。
 @dataclass(frozen=True)
 class InodeDebugEntry:
     inode_id: int
@@ -31,6 +32,7 @@ class InodeDebugEntry:
     size: int = 0
 
 
+# 汇总 inode 位图的总量、已用量、空闲量和明细。
 @dataclass(frozen=True)
 class InodeBitmapDebugInfo:
     total: int
@@ -39,6 +41,7 @@ class InodeBitmapDebugInfo:
     entries: list[InodeDebugEntry]
 
 
+# 表示成组链接法空闲块链表中的一个分组。
 @dataclass(frozen=True)
 class FreeGroupEntry:
     source: str
@@ -46,11 +49,13 @@ class FreeGroupEntry:
     stack: list[int]
     next_group_block: int | None
 
+    # 返回当前分组栈中记录的块数量。
     @property
     def count(self) -> int:
         return len(self.stack)
 
 
+# 汇总空闲块分组链表的当前栈、后继指针和一致性检查结果。
 @dataclass(frozen=True)
 class FreeGroupsDebugInfo:
     current_stack: list[int]
@@ -62,6 +67,7 @@ class FreeGroupsDebugInfo:
     inconsistencies: list[str]
 
 
+# 表示磁盘块映射中的单个块及其用途。
 @dataclass(frozen=True)
 class BlockDebugEntry:
     block_id: int
@@ -71,6 +77,7 @@ class BlockDebugEntry:
     owner_path: str | None = None
 
 
+# 汇总整个磁盘块映射的使用情况和异常信息。
 @dataclass(frozen=True)
 class BlockMapDebugInfo:
     total_blocks: int
@@ -81,6 +88,7 @@ class BlockMapDebugInfo:
     inconsistencies: list[str]
 
 
+# 表示单个文件的直接索引和一级间接索引信息。
 @dataclass(frozen=True)
 class FileIndexDebugInfo:
     path: str
@@ -91,6 +99,7 @@ class FileIndexDebugInfo:
     single_indirect_data_blocks: list[int]
 
 
+# 表示内存 inode 缓存中的单个 inode 调试条目。
 @dataclass(frozen=True)
 class MemoryInodeDebugEntry:
     bucket_id: int
@@ -103,6 +112,7 @@ class MemoryInodeDebugEntry:
     writer_holder: int | None
 
 
+# 汇总内存 inode 缓存的桶数量、容量限制和条目列表。
 @dataclass(frozen=True)
 class MemoryInodeDebugInfo:
     bucket_count: int
@@ -110,12 +120,15 @@ class MemoryInodeDebugInfo:
     entries: list[MemoryInodeDebugEntry]
 
 
+# 只读采集文件系统调试信息的检查器。
 class FileSystemInspector:
     """Collect monitor data without mutating the mounted file system."""
 
+    # 保存待检查的文件系统实例。
     def __init__(self, fs: FileSystem):
         self.fs = fs
 
+    # 读取 inode 位图并生成每个 inode 的使用快照。
     def inode_bitmap(self) -> InodeBitmapDebugInfo:
         with open_disk(self.fs.path) as fp:
             super_block = read_super_block(fp)
@@ -129,11 +142,13 @@ class FileSystemInspector:
             entries=entries,
         )
 
+    # 读取超级块中的空闲块成组链接信息。
     def free_groups(self) -> FreeGroupsDebugInfo:
         with open_disk(self.fs.path) as fp:
             super_block = read_super_block(fp)
             return self._free_groups(fp, super_block)
 
+    # 构建全盘块用途映射，并标记空闲块、目录块、文件块和索引块。
     def block_map(self) -> BlockMapDebugInfo:
         with open_disk(self.fs.path) as fp:
             super_block = read_super_block(fp)
@@ -214,6 +229,7 @@ class FileSystemInspector:
             inconsistencies=inconsistencies,
         )
 
+    # 读取指定文件的直接块和一级间接块索引信息。
     def file_index(self, path: str) -> FileIndexDebugInfo:
         inode, _dir_block = self.fs._resolve_path(path)
         if inode.is_dir:
@@ -231,6 +247,7 @@ class FileSystemInspector:
             single_indirect_data_blocks=indirect_ids,
         )
 
+    # 读取当前内存 inode 缓存中的引用计数、脏标记和锁状态。
     def memory_inodes(self) -> MemoryInodeDebugInfo:
         cache = self.fs.inode_cache
         entries = [
@@ -253,6 +270,7 @@ class FileSystemInspector:
             entries=entries,
         )
 
+    # 根据 inode 位图生成所有 inode 的调试条目。
     def _inode_entries(self, fp, super_block) -> list[InodeDebugEntry]:
         entries = []
         for inode_id in range(super_block.inode_cnt):
@@ -271,6 +289,7 @@ class FileSystemInspector:
             )
         return entries
 
+    # 解析空闲块成组链接链表，并记录异常或循环。
     def _free_groups(self, fp, super_block) -> FreeGroupsDebugInfo:
         current = super_block.block_group_link
         groups = []
@@ -339,6 +358,7 @@ class FileSystemInspector:
             inconsistencies=inconsistencies,
         )
 
+    # 读取所有已分配 inode 的磁盘内容。
     def _used_inodes(self, fp, super_block) -> dict[int, Inode]:
         result = {}
         for inode_id in range(super_block.inode_cnt):
@@ -346,10 +366,12 @@ class FileSystemInspector:
                 result[inode_id] = read_inode(fp, inode_id)
         return result
 
+    # 从根目录开始遍历目录树，建立 inode 编号到路径的映射。
     def _inode_paths(self, fp, used_inodes: dict[int, Inode]) -> dict[int, str]:
         paths = {ROOT_ID: "/"}
         visited = set()
 
+        # 递归访问目录 inode，收集其子文件和子目录路径。
         def walk(inode_id: int, path: str) -> None:
             if inode_id in visited:
                 return
@@ -374,9 +396,11 @@ class FileSystemInspector:
         walk(ROOT_ID, "/")
         return paths
 
+    # 返回文件使用的所有数据块编号，包括直接块和间接块指向的数据块。
     def _file_data_block_ids(self, fp, inode: Inode) -> list[int]:
         return list(inode.direct_blocks) + self._indirect_data_block_ids(fp, inode)
 
+    # 读取一级间接索引块中保存的数据块编号。
     def _indirect_data_block_ids(self, fp, inode: Inode) -> list[int]:
         if inode.indirect_block is None:
             return []
@@ -385,6 +409,7 @@ class FileSystemInspector:
             raise FileSystemError(f"inode {inode.inode_id} has an invalid indirect block")
         return result
 
+    # 直接设置某个数据块在块映射中的角色。
     def _set_data_role(
         self,
         roles: dict[int, BlockDebugEntry],
@@ -398,6 +423,7 @@ class FileSystemInspector:
             data_block_id=data_block_id,
         )
 
+    # 声明某个数据块被指定 inode 使用，并检查重复占用或非法编号。
     def _claim_data_role(
         self,
         roles: dict[int, BlockDebugEntry],

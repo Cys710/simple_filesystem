@@ -492,9 +492,12 @@ class FileSystem:
     # cp 复制文件，支持跨目录复制
     def cp(self, src: str, dst: str, *, overwrite: bool = False) -> None:
         # 解析源文件路径
-        src_inode, _ = self._resolve_path(src)
+        src_inode, src_dir = self._resolve_path(src)
         if src_inode.is_dir:
-            raise FileSystemError(f"cannot copy directory: {src}")
+            if src_dir is None:
+                raise FileSystemError(f"path not found: {src}")
+            self._cp_dir(src, src_inode, src_dir, dst, overwrite=overwrite)
+            return
 
         # 检查源文件读取权限
         self._check_permission(src_inode, "r")
@@ -559,9 +562,12 @@ class FileSystem:
     # mv 移动或重命名文件
     def mv(self, src: str, dst: str, *, overwrite: bool = False) -> None:
         # 解析源文件路径
-        src_inode, _ = self._resolve_path(src)
+        src_inode, src_dir = self._resolve_path(src)
         if src_inode.is_dir:
-            raise FileSystemError(f"cannot move directory: {src}")
+            if src_dir is None:
+                raise FileSystemError(f"path not found: {src}")
+            self._mv_dir(src, src_inode, src_dir, dst, overwrite=overwrite)
+            return
 
         # 检查源文件读取权限（需要读取源文件内容）
         self._check_permission(src_inode, "r")
@@ -675,8 +681,144 @@ class FileSystem:
                 inode_id = parent_dir.son_dirs.pop(old_name)
                 parent_dir.son_dirs[new_name] = inode_id
             self._write_dir(fp, parent_inode, parent_dir)
+            if src_is_dir:
+                dir_inode = read_inode(fp, inode_id)
+                if not dir_inode.direct_blocks:
+                    raise FileSystemError(f"directory inode {inode_id} has no data block")
+                dir_block = read_object(fp, DATA_BLOCK_START_ID + dir_inode.direct_blocks[0])
+                if not isinstance(dir_block, DirBlock):
+                    raise FileSystemError(f"inode {inode_id} does not point to a DirBlock")
+                dir_block.name = new_name
+                write_object(fp, DATA_BLOCK_START_ID + dir_inode.direct_blocks[0], dir_block)
 
         self._refresh_cwd_if_changed(parent_inode.inode_id, parent_dir)
+
+    def _set_mode_like(self, inode_id: int, source: Inode) -> None:
+        with self._hold_inode(inode_id) as memory_inode:
+            memory_inode.inode.mode = self._inode_mode(source)
+            self._mark_inode_dirty(memory_inode)
+
+    def _cp_dir(self, src: str, src_inode: Inode, src_dir: DirBlock, dst: str, *, overwrite: bool) -> None:
+        src_path = self._normalize_path(src).rstrip("/")
+        if src_path == BASE_NAME:
+            raise FileSystemError("cannot copy root directory")
+        self._check_permission(src_inode, "r")
+        self._check_permission(src_inode, "x")
+
+        try:
+            dst_dir_inode, _dst_dir_block = self._resolve_dir(dst)
+            self._check_permission(dst_dir_inode, "w")
+            self._check_permission(dst_dir_inode, "x")
+            dst_path = posixpath.join(self._normalize_path(dst).rstrip("/"), posixpath.basename(src_path))
+        except FileSystemError:
+            dst_path = self._normalize_path(dst).rstrip("/")
+
+        self._cp_dir_exact(src_path, src_inode, src_dir, dst_path, overwrite=overwrite)
+
+    def _cp_dir_exact(self, src_path: str, src_inode: Inode, src_dir: DirBlock, dst_path: str, *, overwrite: bool) -> None:
+        try:
+            dst_inode, dst_dir = self._resolve_dir(dst_path)
+        except FileSystemError:
+            try:
+                existing_inode, _existing_dir = self._resolve_path(dst_path)
+            except FileSystemError:
+                existing_inode = None
+            if existing_inode is not None and not existing_inode.is_dir:
+                if not overwrite:
+                    raise FileSystemError(f"file already exists: {dst_path}")
+                self.remove(dst_path)
+            try:
+                self.mkdir(dst_path)
+            except Exception as exc:
+                raise FileSystemError(str(exc)) from exc
+            dst_inode, dst_dir = self._resolve_dir(dst_path)
+            self._set_mode_like(dst_inode.inode_id, src_inode)
+
+        for name in list(src_dir.son_files.keys()):
+            self.cp(posixpath.join(src_path, name), posixpath.join(dst_path, name), overwrite=overwrite)
+
+        for name in list(src_dir.son_dirs.keys()):
+            child_src_path = posixpath.join(src_path, name)
+            child_inode, child_dir = self._resolve_dir(child_src_path)
+            self._check_permission(child_inode, "r")
+            self._check_permission(child_inode, "x")
+            if child_dir is None:
+                raise FileSystemError(f"path not found: {child_src_path}")
+            self._cp_dir_exact(child_src_path, child_inode, child_dir, posixpath.join(dst_path, name), overwrite=overwrite)
+
+    def _mv_dir(self, src: str, src_inode: Inode, src_dir: DirBlock, dst: str, *, overwrite: bool) -> None:
+        src_path = self._normalize_path(src).rstrip("/")
+        if src_path == BASE_NAME:
+            raise FileSystemError("cannot move root directory")
+        if self._is_cwd_or_ancestor(src_path):
+            raise FileSystemError(f"cannot move current directory or its ancestor: {src}")
+
+        src_parent_inode, src_parent_dir, src_name = self._resolve_parent(src_path)
+        self._check_permission(src_parent_inode, "w")
+        self._check_permission(src_parent_inode, "x")
+        if src_name not in src_parent_dir.son_dirs:
+            if src_name in src_parent_dir.son_files:
+                raise FileSystemError(f"not a directory: {src}")
+            raise FileSystemError(f"path not found: {src}")
+
+        try:
+            dst_inode, dst_dir = self._resolve_dir(dst)
+            dst_parent_inode = dst_inode
+            dst_parent_dir = dst_dir
+            dst_name = posixpath.basename(src_path)
+            dst_path = posixpath.join(self._normalize_path(dst).rstrip("/"), dst_name)
+        except FileSystemError:
+            dst_parent_inode, dst_parent_dir, dst_name = self._resolve_parent(dst)
+            dst_path = self._normalize_path(dst).rstrip("/")
+
+        self._check_permission(dst_parent_inode, "w")
+        self._check_permission(dst_parent_inode, "x")
+
+        if dst_path == src_path or dst_path.startswith(src_path.rstrip("/") + "/"):
+            raise FileSystemError("cannot move a directory into itself")
+
+        if src_parent_inode.inode_id == dst_parent_inode.inode_id and src_name == dst_name:
+            return
+
+        if dst_name in dst_parent_dir.son_files:
+            if not overwrite:
+                raise FileSystemError(f"file already exists: {dst}")
+            existing_inode_id = dst_parent_dir.son_files[dst_name]
+            with open_disk(self.path) as fp:
+                self.super_block = read_super_block(fp)
+                self._remove_file_link(fp, dst_parent_dir, dst_name, existing_inode_id)
+                write_super_block(fp, self.super_block)
+
+        if dst_name in dst_parent_dir.son_dirs:
+            if not overwrite:
+                raise FileSystemError(f"directory already exists: {dst}")
+            self.rmdir(dst_path, recursive=True)
+            parent_path = posixpath.dirname(dst_path) or BASE_NAME
+            dst_parent_inode, dst_parent_dir = self._resolve_dir(parent_path)
+
+        with open_disk(self.path) as fp:
+            if src_parent_inode.inode_id == dst_parent_inode.inode_id:
+                inode_id = src_parent_dir.son_dirs.pop(src_name)
+                src_parent_dir.son_dirs[dst_name] = inode_id
+                self._write_dir(fp, src_parent_inode, src_parent_dir)
+            else:
+                inode_id = src_parent_dir.son_dirs.pop(src_name)
+                self._write_dir(fp, src_parent_inode, src_parent_dir)
+                dst_parent_dir.add_new_dir(dst_name, inode_id)
+                self._write_dir(fp, dst_parent_inode, dst_parent_dir)
+
+            dir_inode = read_inode(fp, inode_id)
+            if not dir_inode.direct_blocks:
+                raise FileSystemError(f"directory inode {inode_id} has no data block")
+            dir_block = read_object(fp, DATA_BLOCK_START_ID + dir_inode.direct_blocks[0])
+            if not isinstance(dir_block, DirBlock):
+                raise FileSystemError(f"inode {inode_id} does not point to a DirBlock")
+            dir_block.name = dst_name
+            dir_block.parent_inode_id = dst_parent_inode.inode_id
+            write_object(fp, DATA_BLOCK_START_ID + dir_inode.direct_blocks[0], dir_block)
+
+        self._refresh_cwd_if_changed(src_parent_inode.inode_id, src_parent_dir)
+        self._refresh_cwd_if_changed(dst_parent_inode.inode_id, dst_parent_dir)
 
     # rmdir 删除指定路径的目录，目录必须为空
     def rmdir(self, path: str, *, recursive: bool = False) -> None:
