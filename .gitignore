@@ -40,3 +40,4 @@ agent.md
 
 # Local AI/generated scratch directories
 ai_impl/
+.VSCodeCounter/

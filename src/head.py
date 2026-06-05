@@ -52,7 +52,7 @@ MAX_USER_COUNT = 32
 MAX_DIR_ENTRY_COUNT = 128
 
 # 根目录ID
-ROOT_ID = -1
+# ROOT_ID = -1
 
 # FREE_NODE_CNT = 32     # 超级块缓存空闲inode数
 # FREE_BLOCK_CNT = 128   # 超级块缓存空闲数据块数
